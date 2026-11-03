@@ -16,13 +16,18 @@ Rules (in order of what matters most):
             track is almost always English). Drop everything else.
             MP4 text subs are converted to SRT. Font attachments are kept so
             styled ASS subs still render.
-  Video     H.265 on Intel Quick Sync. 4K is scaled to 1080p. Interlaced DVD
-            material is deinterlaced. 10-bit sources stay 10-bit. HDR video and
-            already-efficient H.265/AV1 are copied, not re-encoded.
-  Safety    Originals are never touched. Output goes to a "Clean" folder next to
-            the source, written as a hidden temp file, checked (duration,
-            streams), and only kept if it is smaller (or if the stereo rule
-            required the change). Each Clean folder gets a README listing what
+  Video     H.265 on Intel Quick Sync. 4K is scaled to fit 1920x1080 (decode and
+            resize on the iGPU). Interlaced DVD material is deinterlaced. 10-bit
+            sources stay 10-bit. HDR10/HLG is re-encoded at 1080p and stays HDR
+            (checked afterwards; if HDR is lost, the 4K video is copied instead).
+            Dolby Vision with no HDR10 base layer is copied untouched. Already
+            efficient H.265 is copied (remuxed), everything else becomes H.265.
+  Safety    Originals are never touched. Every file gets a Clean copy so the
+            whole library ends up in one consistent format. Output is written
+            as a hidden temp file in a "Clean" folder next to the source,
+            checked (duration, streams, HDR), and kept; a re-encode may be up
+            to 20% bigger, beyond that the original video is remuxed instead.
+            Each Clean folder gets a README listing what
             happened to every file, plus .plexignore / .ignore so Plex and
             Jellyfin don't show the copies while you inspect them. A run stops
             before the NAS gets too full (--min-free-gb).
@@ -89,7 +94,7 @@ DEFAULTS = {
     "max_height": 1080,
     "max_width": 1920,
     "copy_hevc_bpp": 0.06,   # H.265/AV1 below this bits-per-pixel is left alone
-    "min_saving": 0.05,      # a re-encode must save at least 5% to be kept
+    "max_growth": 1.20,      # a re-encode may come out up to 20% bigger (consistency first)
     "audio_bitrate": "192k",
     "min_age_minutes": 60,   # skip files touched in the last hour (imports in progress)
     "min_free_gb": 500,      # never start a file that could push NAS free space below this
@@ -347,7 +352,7 @@ def plan_file(path, info, cfg):
     else:
         out_w, out_h = w, h
     interlaced = v.get("field_order", "") in INTERLACED
-    efficient = v.get("codec_name") in ("hevc", "av1") and bpp and bpp < cfg["copy_hevc_bpp"]
+    efficient = v.get("codec_name") == "hevc" and bpp and bpp < cfg["copy_hevc_bpp"]
 
     if dv_only:
         video_mode, video_why = "copy", f"Dolby Vision profile {dovi[0]} with no HDR10 base (kept as-is)"
@@ -640,7 +645,8 @@ def find_files(roots, cfg, state, include_done=False):
             if st.st_mtime > min_age:
                 continue
             prev = state.get(str(p))
-            if prev and prev.get("mtime") == int(st.st_mtime) and not cfg["retry_failed"]:
+            if prev and prev.get("mtime") == int(st.st_mtime) and prev.get("status") != "fine" \
+                    and not cfg["retry_failed"]:
                 continue
             items.append((p, st.st_size))
     items.sort(key=lambda x: x[1], reverse=True)
@@ -1160,16 +1166,15 @@ def main():
                   f"{cfg['min_free_gb']} GB. Clear some space (or lower --min-free-gb) and run again.")
             break
         created_clean = False
-        if plan["video_mode"] == "encode" or plan["rule_change"]:
-            created_clean = clean_dir_for(path)
+        created_clean = clean_dir_for(path)
 
         attempts = [plan["video_mode"]]
         if plan["video_mode"] == "encode":
             attempts.append("copy")            # fallback if the re-encode is not smaller
         result, notes, new_size = None, [], 0
         for mode in attempts:
-            if mode == "copy" and not plan["rule_change"]:
-                break                          # nothing to gain from a copy pass
+            # Every file gets a verified Clean copy, even one that already meets the
+            # rules (then it is a straight remux: same streams, new container and name).
             rc, err = 1, []
             for decode, rate, lp in variants(plan, fcfg, mode):
                 cmd = build_cmd(plan, fcfg, out_path, mode, rate_mode=rate, decode=decode, low_power=lp)
@@ -1197,11 +1202,14 @@ def main():
                 out_path.unlink(missing_ok=True)
                 continue
             new_size = out_path.stat().st_size
-            smaller = new_size <= size * (1 - cfg["min_saving"])
-            if smaller or (mode == "copy" and (new_size < size or plan["audio_required"])):
+            if mode == "copy" or new_size <= size * cfg["max_growth"]:
                 result = "done"
+                if mode == "copy" and plan["video_mode"] == "encode":
+                    print(f"  note  : re-encode came out too big, kept the original "
+                          f"{plan['video'].get('codec_name')} video")
                 break
-            notes.append(f"{mode} gave {human(new_size)} vs {human(size)}, not worth it")
+            notes.append(f"{mode} gave {human(new_size)} vs {human(size)}, more than "
+                         f"{(cfg['max_growth'] - 1) * 100:.0f}% bigger")
             out_path.unlink(missing_ok=True)
 
         if STOP.now:
@@ -1228,8 +1236,10 @@ def main():
             saved += size - new_size
             counts["done"] += 1
             state[str(path)] = {"status": "done", "mtime": mtime, "orig": size, "new": new_size}
-            print(f"  [done] {human(size)} -> {human(new_size)} "
-                  f"({(1 - new_size / size) * 100:.0f}% smaller), saved as Clean/{final_path.name}")
+            change = (1 - new_size / size) * 100
+            how = (f"{change:.0f}% smaller" if change >= 0.5 else
+                   f"{-change:.0f}% bigger" if change <= -0.5 else "same size, remuxed")
+            print(f"  [done] {human(size)} -> {human(new_size)} ({how}), saved as Clean/{final_path.name}")
         elif all("not worth it" in x or x.startswith("retry:") for x in notes):
             result, new_size = "fine", size
             counts["kept"] += 1
