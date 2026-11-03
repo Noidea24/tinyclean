@@ -64,6 +64,8 @@ UNTAGGED = {"", "und", "unk", "unknown", "none", "zxx"}
 TEXT_SUB_CONVERT = {"mov_text": "srt"}          # codec -> target for MKV
 DROP_SUB_CODECS = {"eia_608", "none", ""}       # not storable / not real subs
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
+HDR_NAMES = {"smpte2084": "HDR10", "arib-std-b67": "HLG"}
+DV_TOKENS = re.compile(r"(?i)[ ._-]*(?<![0-9a-z])(dv|dovi|dolby[ ._-]?vision)(?![0-9a-z])")
 INTERLACED = {"tt", "bb", "tb", "bt"}
 # Codecs the UHD 630 can decode on the GPU, and the pixel formats it accepts.
 QSV_DECODERS = {"h264": "h264_qsv", "hevc": "hevc_qsv", "mpeg2video": "mpeg2_qsv",
@@ -161,6 +163,48 @@ def ffprobe(ffprobe_bin, path):
     if out.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {out.stderr.strip()[-300:]}")
     return json.loads(out.stdout)
+
+
+def dovi_of(v):
+    """Dolby Vision (profile, base-layer compatibility id) from a video stream, or None."""
+    for sd in v.get("side_data_list", []) or []:
+        if "dovi" in str(sd.get("side_data_type", "")).lower():
+            return int(sd.get("dv_profile", -1)), int(sd.get("dv_bl_signal_compatibility_id", -1))
+    return None
+
+
+def first_frame_has_mastering(ffprobe_bin, path):
+    """True if the first video frame carries HDR mastering-display data."""
+    try:
+        out = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#1",
+             "-show_frames", "-show_entries", "frame=side_data_list", "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=120)
+        frames = json.loads(out.stdout or "{}").get("frames", [])
+    except Exception:  # noqa: BLE001
+        return False
+    return any("mastering" in str(sd.get("side_data_type", "")).lower()
+               for f in frames for sd in f.get("side_data_list", []) or [])
+
+
+def hdr_report(cfg, plan, out_path):
+    """After an HDR encode: (ok, text). ok = the HDR signalling survived."""
+    try:
+        ov = next(s for s in ffprobe(cfg["ffprobe"], out_path)["streams"] if s.get("codec_type") == "video")
+    except Exception as exc:  # noqa: BLE001
+        return False, f"could not read output ({exc})"
+    v = plan["video"]
+    if ov.get("color_transfer") != v.get("color_transfer") or \
+            (v.get("color_primaries") and ov.get("color_primaries") != v.get("color_primaries")):
+        return False, (f"HDR lost: output is {ov.get('color_transfer')}/{ov.get('color_primaries')}, "
+                       f"source {v.get('color_transfer')}/{v.get('color_primaries')}")
+    text = f"{HDR_NAMES.get(v.get('color_transfer'), 'HDR')} kept ({ov.get('pix_fmt')})"
+    if v.get("color_transfer") == "smpte2084" and first_frame_has_mastering(cfg["ffprobe"], plan["path"]):
+        if first_frame_has_mastering(cfg["ffprobe"], out_path):
+            text += ", brightness metadata kept"
+        else:
+            text += ", brightness metadata missing (TVs use their defaults)"
+    return True, text
 
 
 def duration_of(info):
@@ -291,7 +335,11 @@ def plan_file(path, info, cfg):
         vbr = max(0, int(size * 8 / dur) - other)
     bpp = vbr / (w * h * fps) if w and h and fps else 0.0
     hdr = v.get("color_transfer", "") in HDR_TRANSFERS
-    ten_bit = "10" in v.get("pix_fmt", "") or "12" in v.get("pix_fmt", "")
+    dovi = dovi_of(v)
+    # Dolby Vision with no HDR10/HLG/SDR base layer (profile 5): only DV players
+    # can show it right; re-encoding gives a green/purple picture. Never touch it.
+    dv_only = dovi is not None and (dovi[1] == 0 or (dovi[0] == 5 and dovi[1] < 0))
+    ten_bit = "10" in v.get("pix_fmt", "") or "12" in v.get("pix_fmt", "") or hdr
     needs_scale = h > cfg["max_height"] or w > cfg["max_width"]
     if needs_scale:
         f = min(cfg["max_width"] / w, cfg["max_height"] / h)
@@ -301,8 +349,10 @@ def plan_file(path, info, cfg):
     interlaced = v.get("field_order", "") in INTERLACED
     efficient = v.get("codec_name") in ("hevc", "av1") and bpp and bpp < cfg["copy_hevc_bpp"]
 
-    if hdr:
-        video_mode, video_why = "copy", "HDR (kept as-is)"
+    if dv_only:
+        video_mode, video_why = "copy", f"Dolby Vision profile {dovi[0]} with no HDR10 base (kept as-is)"
+    elif hdr and not cfg.get("hdr_encode", True):
+        video_mode, video_why = "copy", "HDR (kept as-is, --keep-hdr)"
     elif efficient and not needs_scale:
         video_mode, video_why = "copy", f"already efficient {v.get('codec_name')} ({bpp:.3f} bpp)"
     else:
@@ -313,6 +363,10 @@ def plan_file(path, info, cfg):
         if interlaced:
             bits.append("deinterlace")
         bits.append("10-bit" if ten_bit else "8-bit")
+        if hdr:
+            bits.append(f"{HDR_NAMES.get(v.get('color_transfer'), 'HDR')} kept")
+        if dovi:
+            bits.append("Dolby Vision layer dropped")
         q = cfg["quality_sd"] if h <= 576 else cfg["quality_hd"]
         bits.append(f"q{q}")
         bits.append(cfg["preset"] if cfg["encoder"] == "qsv" else cfg["x265_preset"])
@@ -356,7 +410,7 @@ def plan_file(path, info, cfg):
     return {
         "gpu_decode": gpu_decode, "fps": fps, "width": w, "out_w": out_w, "out_h": out_h,
         "path": path, "size": size, "duration": dur, "video": v, "video_mode": video_mode,
-        "video_why": video_why, "hdr": hdr, "ten_bit": ten_bit, "needs_scale": needs_scale,
+        "video_why": video_why, "hdr": hdr, "dovi": dovi, "ten_bit": ten_bit, "needs_scale": needs_scale,
         "interlaced": interlaced, "height": h, "audio": audio, "subs": subs, "subs_why": s_why,
         "subs_dropped": len(all_subs) - len(subs), "attachments": attachments,
         "rule_change": rule_change, "audio_required": any(a["mode"] == "downmix" for a in audio),
@@ -403,6 +457,12 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, dec
         if plan["needs_scale"]:
             filters.append(f"scale={plan['out_w']}:{plan['out_h']}:flags=lanczos")
         q = cfg["quality_sd"] if plan["height"] <= 576 else cfg["quality_hd"]
+        if plan["hdr"]:
+            # Carry the HDR colour signalling into the new stream.
+            cmd += ["-color_primaries", v.get("color_primaries") or "bt2020",
+                    "-color_trc", v.get("color_transfer"),
+                    "-colorspace", v.get("color_space") or "bt2020nc",
+                    "-color_range", v.get("color_range") or "tv"]
         if cfg["encoder"] == "qsv":
             if not gpu:
                 filters += ["format=p010le" if plan["ten_bit"] else "format=nv12",
@@ -420,7 +480,8 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, dec
         else:  # software x265, for testing or a no-GPU box
             filters.append("format=yuv420p10le" if plan["ten_bit"] else "format=yuv420p")
             cmd += ["-vf", ",".join(filters), "-c:v", "libx265", "-preset", cfg["x265_preset"],
-                    "-crf", str(q), "-x265-params", "log-level=error"]
+                    "-crf", str(q), "-x265-params",
+                    "log-level=error" + (":hdr10=1:hdr10-opt=1" if plan["hdr"] and v.get("color_transfer") == "smpte2084" else "")]
     else:
         cmd += ["-c:v", "copy"]
 
@@ -534,6 +595,11 @@ def verify(cfg, plan, out_path, sample_len=None):
         return False, f"duration mismatch: source {src:.1f}s, output {out:.1f}s"
     if out_path.stat().st_size < 1024 * 1024 and src > 60:
         return False, "output suspiciously small"
+    if plan["hdr"]:
+        ov = next(s for s in streams if s.get("codec_type") == "video")
+        if ov.get("color_transfer") != plan["video"].get("color_transfer"):
+            return False, (f"HDR lost (output transfer {ov.get('color_transfer')}, "
+                           f"source {plan['video'].get('color_transfer')})")
     return True, "ok"
 
 
@@ -543,7 +609,7 @@ def verify(cfg, plan, out_path, sample_len=None):
 ALREADY_DONE = []
 
 
-def find_files(roots, cfg, state):
+def find_files(roots, cfg, state, include_done=False):
     skip_dir = re.compile(r"^[._@#]")
     min_age = time.time() - cfg["min_age_minutes"] * 60
     items = []
@@ -563,8 +629,8 @@ def find_files(roots, cfg, state):
                 continue
             if p.stem.lower().endswith(SUFFIX.lower()):
                 continue
-            if (p.parent / CLEAN_DIR / f"{p.stem}{SUFFIX}.mkv").exists() or \
-                    p.name in read_map(p.parent / CLEAN_DIR).values():
+            if not include_done and ((p.parent / CLEAN_DIR / f"{p.stem}{SUFFIX}.mkv").exists() or
+                                     p.name in read_map(p.parent / CLEAN_DIR).values()):
                 ALREADY_DONE.append(p)        # already has a Clean copy
                 continue
             try:
@@ -877,6 +943,10 @@ def main():
     ap.add_argument("--encoder", choices=["qsv", "x265"], default="qsv")
     ap.add_argument("--device", default="/dev/dri/renderD128")
     ap.add_argument("--profile", choices=sorted(PROFILES), help="use this profile for every file (no questions)")
+    ap.add_argument("--keep-hdr", action="store_true",
+                    help="copy HDR video untouched (old behaviour) instead of re-encoding it at 1080p")
+    ap.add_argument("--keep-sample", action="store_true",
+                    help="with --sample: keep the last clip as /data/_tools/tinyclean-sample.mkv")
     ap.add_argument("--batch", type=int, default=10, metavar="N",
                     help="ask animated/live for N shows at a time, convert them, then ask for the next N "
                          "(0 = ask for every show up front)")
@@ -903,6 +973,7 @@ def main():
                                          ("preset", args.preset)) if v is not None},
         "x265_preset": args.x265_preset, "min_age_minutes": args.min_age,
         "retry_failed": args.retry_failed, "min_free_gb": args.min_free_gb,
+        "hdr_encode": not args.keep_hdr,
     })
 
     if args.replace:
@@ -956,7 +1027,8 @@ def main():
             else:
                 in_progress = {o for o in map(original_for_temp, unfinished) if o}
                 print("Leaving them alone and skipping those videos this run.\n")
-    files = find_files(args.paths, cfg, {} if (args.dry_run or args.sample) else state)
+    files = find_files(args.paths, cfg, {} if (args.dry_run or args.sample) else state,
+                       include_done=bool(args.sample))
     if not args.dry_run and not args.sample:
         free = shutil.disk_usage(args.paths[0] if Path(args.paths[0]).is_dir() else Path(args.paths[0]).parent).free
         print(f"NAS free space: {human(free)} (tinyclean keeps at least {cfg['min_free_gb']} GB free).")
@@ -1070,8 +1142,15 @@ def main():
             if rc != 0:
                 print("  sample failed: " + (err[-1] if err else f"exit {rc}") + "\n")
                 continue
+            if mode == "encode" and plan["hdr"]:
+                print(f"  hdr   : {hdr_report(cfg, plan, sample_out)[1]}")
             ratio = sample_out.stat().st_size / (size * length / plan["duration"]) if plan["duration"] else 0
             print(f"  projected size: {ratio * 100:.0f}% of original (~{human(size * ratio)}, saves ~{human(size * (1 - ratio))})\n")
+            if args.keep_sample:
+                keep_dir = Path("/data/_tools") if Path("/data/_tools").is_dir() else state_dir
+                kept = keep_dir / f"{path.stem}-sample.mkv"
+                shutil.move(str(sample_out), str(kept))
+                print(f"  sample kept: {kept}\n")
             sample_out.unlink(missing_ok=True)
             continue
 
@@ -1129,8 +1208,13 @@ def main():
             break
 
         mtime = int(path.stat().st_mtime)
-        if result == "done" and mode == "encode" and plan["needs_scale"]:
-            final_path = clean / f"{scaled_name(path.stem, plan['out_w'], plan['out_h'])}{SUFFIX}.mkv"
+        if result == "done" and mode == "encode" and (plan["needs_scale"] or plan["dovi"]):
+            stem = scaled_name(path.stem, plan['out_w'], plan['out_h']) if plan["needs_scale"] else path.stem
+            if plan["dovi"]:
+                stem = DV_TOKENS.sub("", stem).strip(" ._-") or stem
+            final_path = clean / f"{stem}{SUFFIX}.mkv"
+        if result == "done" and mode == "encode" and plan["hdr"]:
+            print(f"  hdr   : {hdr_report(cfg, plan, out_path)[1]}")
         if result == "done":
             if final_path.exists():
                 print(f"  [skip] {final_path.name} already exists in Clean, leaving it\n")
