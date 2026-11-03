@@ -64,10 +64,16 @@ TEXT_SUB_CONVERT = {"mov_text": "srt"}          # codec -> target for MKV
 DROP_SUB_CODECS = {"eia_608", "none", ""}       # not storable / not real subs
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
 INTERLACED = {"tt", "bb", "tb", "bt"}
+# Codecs the UHD 630 can decode on the GPU, and the pixel formats it accepts.
+QSV_DECODERS = {"h264": "h264_qsv", "hevc": "hevc_qsv", "mpeg2video": "mpeg2_qsv",
+                "vc1": "vc1_qsv", "vp9": "vp9_qsv"}
+QSV_PIX_FMTS = {"h264": {"yuv420p", "yuvj420p"}, "mpeg2video": {"yuv420p"}, "vc1": {"yuv420p"},
+                "hevc": {"yuv420p", "yuv420p10le"}, "vp9": {"yuv420p", "yuv420p10le"}}
 
 DEFAULTS = {
     "quality_hd": 24,        # Quick Sync ICQ / CQP value for > 576p (lower = better, bigger)
     "quality_sd": 23,        # value for SD (DVD) material
+    "preset": "faster",      # Quick Sync speed preset (faster ~12x on the UHD 630; fast/slow ~3x)
     "max_height": 1080,
     "copy_hevc_bpp": 0.06,   # H.265/AV1 below this bits-per-pixel is left alone
     "min_saving": 0.05,      # a re-encode must save at least 5% to be kept
@@ -285,6 +291,7 @@ def plan_file(path, info, cfg):
         bits.append("10-bit" if ten_bit else "8-bit")
         q = cfg["quality_sd"] if h <= 576 else cfg["quality_hd"]
         bits.append(f"q{q}")
+        bits.append(cfg["preset"] if cfg["encoder"] == "qsv" else cfg["x265_preset"])
         video_why = f"{v.get('codec_name')} {w}x{h} {bpp:.3f} bpp -> H.265 (" + ", ".join(bits) + ")"
 
     # ---- audio
@@ -317,7 +324,12 @@ def plan_file(path, info, cfg):
         or len(subs) != len(all_subs) or any(s.get("codec_name") in TEXT_SUB_CONVERT for s in subs)
         or path.suffix.lower() != ".mkv")
 
+    codec, pix = v.get("codec_name"), v.get("pix_fmt", "")
+    gpu_decode = (codec in QSV_DECODERS and pix in QSV_PIX_FMTS.get(codec, set())
+                  and not needs_scale and not interlaced)
+
     return {
+        "gpu_decode": gpu_decode,
         "path": path, "size": size, "duration": dur, "video": v, "video_mode": video_mode,
         "video_why": video_why, "hdr": hdr, "ten_bit": ten_bit, "needs_scale": needs_scale,
         "interlaced": interlaced, "height": h, "audio": audio, "subs": subs, "subs_why": s_why,
@@ -329,7 +341,7 @@ def plan_file(path, info, cfg):
 # -------------------------------------------------------------- ffmpeg cmd --
 
 
-def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None):
+def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, decode="cpu"):
     v = plan["video"]
     cmd = [cfg["ffmpeg"], "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
            "-nostats", "-progress", "pipe:1", "-fflags", "+genpts"]
@@ -338,6 +350,11 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None):
         # Same device setup Jellyfin uses: VA-API on the iGPU, Quick Sync on top.
         cmd += ["-init_hw_device", f"vaapi=va:{cfg['device']},driver=iHD",
                 "-init_hw_device", "qsv=qs@va", "-filter_hw_device", "qs"]
+    gpu = encode and cfg["encoder"] == "qsv" and decode == "gpu"
+    if gpu:
+        # Decode on the iGPU too: frames never leave the GPU (much faster at fast presets).
+        cmd += ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv",
+                "-c:v", QSV_DECODERS[plan["video"]["codec_name"]]]
     if sample:
         cmd += ["-ss", str(sample[0])]
     cmd += ["-i", str(plan["path"])]
@@ -362,9 +379,11 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None):
             filters.append(f"scale=-2:{cfg['max_height']}:flags=lanczos")
         q = cfg["quality_sd"] if plan["height"] <= 576 else cfg["quality_hd"]
         if cfg["encoder"] == "qsv":
-            filters += ["format=p010le" if plan["ten_bit"] else "format=nv12",
-                        "hwupload=extra_hw_frames=64"]
-            cmd += ["-vf", ",".join(filters), "-c:v", "hevc_qsv", "-preset", "slow",
+            if not gpu:
+                filters += ["format=p010le" if plan["ten_bit"] else "format=nv12",
+                            "hwupload=extra_hw_frames=64"]
+                cmd += ["-vf", ",".join(filters)]
+            cmd += ["-c:v", "hevc_qsv", "-preset", cfg["preset"],
                     "-profile:v", "main10" if plan["ten_bit"] else "main"]
             # ICQ (constant quality) first; CQP if the driver refuses ICQ.
             cmd += ["-global_quality", str(q)] if rate_mode == "icq" else ["-q:v", str(q)]
@@ -571,6 +590,14 @@ def write_readme(folder, state):
 # ------------------------------------------------------------------ main --
 
 
+def variants(plan, cfg, mode):
+    """Ways to try an encode, best first: GPU decode, then CPU decode; ICQ, then CQP."""
+    if mode != "encode" or cfg["encoder"] != "qsv":
+        return [("cpu", "icq")]
+    decodes = ["gpu", "cpu"] if plan["gpu_decode"] else ["cpu"]
+    return [(d, r) for d in decodes for r in ("icq", "cqp")]
+
+
 def describe(plan):
     lines = [f"  video : {plan['video_mode']} - {plan['video_why']}"]
     if not plan["audio"]:
@@ -595,6 +622,9 @@ def main():
     ap.add_argument("--device", default="/dev/dri/renderD128")
     ap.add_argument("--quality-hd", type=int, default=DEFAULTS["quality_hd"])
     ap.add_argument("--quality-sd", type=int, default=DEFAULTS["quality_sd"])
+    ap.add_argument("--preset", default=DEFAULTS["preset"],
+                    choices=["veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"],
+                    help="Quick Sync speed preset")
     ap.add_argument("--x265-preset", default="medium")
     ap.add_argument("--min-age", type=int, default=DEFAULTS["min_age_minutes"], help="minutes since last change before a file is touched")
     ap.add_argument("--retry-failed", action="store_true")
@@ -606,7 +636,7 @@ def main():
         "ffmpeg": jf + "ffmpeg" if os.path.exists(jf + "ffmpeg") else "ffmpeg",
         "ffprobe": jf + "ffprobe" if os.path.exists(jf + "ffprobe") else "ffprobe",
         "encoder": args.encoder, "device": args.device,
-        "quality_hd": args.quality_hd, "quality_sd": args.quality_sd,
+        "quality_hd": args.quality_hd, "quality_sd": args.quality_sd, "preset": args.preset,
         "x265_preset": args.x265_preset, "min_age_minutes": args.min_age,
         "retry_failed": args.retry_failed, "min_free_gb": args.min_free_gb,
     })
@@ -690,11 +720,12 @@ def main():
             length = min(60.0, plan["duration"])
             sample_out = state_dir / "sample.mkv"
             mode = plan["video_mode"]
-            cmd = build_cmd(plan, cfg, sample_out, mode, sample=(start, length))
-            rc, err = run_ffmpeg(cmd, length, f"  sample", progress)
-            if rc != 0 and mode == "encode" and cfg["encoder"] == "qsv":
-                cmd = build_cmd(plan, cfg, sample_out, mode, rate_mode="cqp", sample=(start, length))
-                rc, err = run_ffmpeg(cmd, length, f"  sample (CQP)", progress)
+            rc, err = 1, []
+            for decode, rate in variants(plan, cfg, mode):
+                cmd = build_cmd(plan, cfg, sample_out, mode, rate_mode=rate, sample=(start, length), decode=decode)
+                rc, err = run_ffmpeg(cmd, length, f"  sample ({decode} decode)", progress)
+                if rc == 0 or STOP.now:
+                    break
             if tty:
                 print()
             if rc != 0:
@@ -721,18 +752,18 @@ def main():
         for mode in attempts:
             if mode == "copy" and not plan["rule_change"]:
                 break                          # nothing to gain from a copy pass
-            rate_modes = ["icq", "cqp"] if (mode == "encode" and cfg["encoder"] == "qsv") else ["icq"]
             rc, err = 1, []
-            for rate in rate_modes:
-                cmd = build_cmd(plan, cfg, out_path, mode, rate_mode=rate)
+            for decode, rate in variants(plan, cfg, mode):
+                cmd = build_cmd(plan, cfg, out_path, mode, rate_mode=rate, decode=decode)
                 label = f"  {'encoding' if mode == 'encode' else 'remuxing'}"
+                if mode == "encode" and cfg["encoder"] == "qsv":
+                    label += f" ({decode} decode)"
                 rc, err = run_ffmpeg(cmd, plan["duration"], label, progress)
                 if tty:
                     print()
                 if rc == 0 or STOP.now:
                     break
-                if rate == "icq":
-                    notes.append("ICQ refused, retried with CQP")
+                notes.append(f"retry: {decode}/{rate} attempt failed ({(err[-1] if err else 'exit ' + str(rc))[:120]})")
             if STOP.now:
                 out_path.unlink(missing_ok=True)
                 break
@@ -769,7 +800,7 @@ def main():
             state[str(path)] = {"status": "done", "mtime": mtime, "orig": size, "new": new_size}
             print(f"  [done] {human(size)} -> {human(new_size)} "
                   f"({(1 - new_size / size) * 100:.0f}% smaller), saved as Clean/{final_path.name}")
-        elif not notes or all("not worth it" in x for x in notes):
+        elif all("not worth it" in x or x.startswith("retry:") for x in notes):
             result, new_size = "fine", size
             counts["kept"] += 1
             state[str(path)] = {"status": "fine", "mtime": mtime, "orig": size}
