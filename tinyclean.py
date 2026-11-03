@@ -351,10 +351,10 @@ def plan_file(path, info, cfg):
 
     codec, pix = v.get("codec_name"), v.get("pix_fmt", "")
     gpu_decode = (codec in QSV_DECODERS and pix in QSV_PIX_FMTS.get(codec, set())
-                  and not needs_scale and not interlaced)
+                  and not interlaced)  # scaling also runs on the GPU (vpp_qsv)
 
     return {
-        "gpu_decode": gpu_decode, "width": w, "out_w": out_w, "out_h": out_h,
+        "gpu_decode": gpu_decode, "fps": fps, "width": w, "out_w": out_w, "out_h": out_h,
         "path": path, "size": size, "duration": dur, "video": v, "video_mode": video_mode,
         "video_why": video_why, "hdr": hdr, "ten_bit": ten_bit, "needs_scale": needs_scale,
         "interlaced": interlaced, "height": h, "audio": audio, "subs": subs, "subs_why": s_why,
@@ -408,6 +408,9 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, dec
                 filters += ["format=p010le" if plan["ten_bit"] else "format=nv12",
                             "hwupload=extra_hw_frames=64"]
                 cmd += ["-vf", ",".join(filters)]
+            elif plan["needs_scale"]:
+                # Resize on the iGPU too, so 4K never touches the CPU.
+                cmd += ["-vf", f"vpp_qsv=w={plan['out_w']}:h={plan['out_h']}"]
             cmd += ["-c:v", "hevc_qsv", "-preset", cfg["preset"],
                     "-profile:v", "main10" if plan["ten_bit"] else "main"]
             if low_power:
@@ -466,7 +469,7 @@ class Stopper:
 STOP = Stopper()
 
 
-def run_ffmpeg(cmd, total_seconds, label, progress):
+def run_ffmpeg(cmd, total_seconds, label, progress, src_fps=None):
     """Run ffmpeg, drawing a progress line. Returns (returncode, last stderr lines)."""
     err = deque(maxlen=40)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
@@ -490,8 +493,16 @@ def run_ffmpeg(cmd, total_seconds, label, progress):
                     done = int(state.get("out_time_us") or state.get("out_time_ms") or 0) / 1e6
                 except ValueError:
                     done = 0.0
+                if done <= 0 and src_fps:
+                    # Some files report no output time until the end; count frames instead.
+                    try:
+                        done = int(state.get("frame", 0)) / src_fps
+                    except ValueError:
+                        done = 0.0
                 pct = min(100.0, done / total_seconds * 100) if total_seconds else 0.0
                 speed = state.get("speed", "?").strip()
+                if speed in ("N/A", "?", "") and done > 0 and now > started:
+                    speed = f"{done / (now - started):.2f}x"
                 fps = state.get("fps", "?")
                 elapsed = now - started
                 eta = (elapsed / pct * (100 - pct)) if pct > 0.5 else 0
@@ -988,7 +999,7 @@ def main():
             for decode, rate, lp in variants(plan, fcfg, mode):
                 cmd = build_cmd(plan, fcfg, sample_out, mode, rate_mode=rate, sample=(start, length),
                                 decode=decode, low_power=lp)
-                rc, err = run_ffmpeg(cmd, length, f"  sample ({decode} decode{', low-power' if lp else ''})", progress)
+                rc, err = run_ffmpeg(cmd, length, f"  sample ({decode} decode{', low-power' if lp else ''})", progress, plan.get("fps"))
                 if rc == 0 or STOP.now:
                     if rc == 0 and mode == "encode":
                         WORKED[:] = [(rate, lp)]
@@ -1025,7 +1036,7 @@ def main():
                 label = f"  {'encoding' if mode == 'encode' else 'remuxing'}"
                 if mode == "encode" and cfg["encoder"] == "qsv":
                     label += f" ({decode} decode{', low-power' if lp else ''})"
-                rc, err = run_ffmpeg(cmd, plan["duration"], label, progress)
+                rc, err = run_ffmpeg(cmd, plan["duration"], label, progress, plan.get("fps"))
                 if tty:
                     print()
                 if rc == 0 or STOP.now:
