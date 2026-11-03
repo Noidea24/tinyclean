@@ -1041,10 +1041,19 @@ def status_text(root, rows):
     return "\n".join(out) + "\n"
 
 
-def write_status(root, echo=False):
+def write_status(root, echo=False, working_on=None):
+    """working_on: the file this worker is converting right now (counts as converting)."""
     root = Path(root)
     try:
-        text = status_text(root, scan_status(root))
+        rows = scan_status(root)
+        if working_on:
+            try:
+                top = Path(working_on).relative_to(root).parts[0]
+                if top in rows:
+                    rows[top]["busy"] += 1
+            except ValueError:
+                pass
+        text = status_text(root, rows)
         tmp = root / f".{STATUS_NAME}.{os.getpid()}.tmp"
         tmp.write_text(text)
         tmp.replace(root / STATUS_NAME)
@@ -1261,6 +1270,9 @@ def main():
             ask_batch(upcoming, profiles, show_info)
             save_profiles()
         head = f"[{n}/{len(files)}]"
+        if not args.dry_run and not args.sample and time.time() - last_status > 120:
+            write_status(status_root, working_on=path)
+            last_status = time.time()
         print(f"{head} {path}  ({human(size)})")
         t0 = time.time()
         try:
@@ -1407,9 +1419,6 @@ def main():
             print("  [FAILED] " + "; ".join(notes))
         save_state()
         write_readme(path.parent, state)
-        if time.time() - last_status > 120:
-            write_status(status_root)
-            last_status = time.time()
         # Remove a Clean folder this file's run created but left with nothing in it.
         if created_clean and result != "done" and clean.is_dir() and not any(p.suffix == ".mkv" and not p.name.startswith(".") for p in clean.iterdir()) \
                 and not any(v.get("status") == "done" for k, v in state.items() if Path(k).parent == path.parent):
