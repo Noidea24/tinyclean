@@ -697,6 +697,35 @@ def ask_profiles(shows, profiles, interactive):
     return True
 
 
+def ask_batch(upcoming, profiles, info):
+    """Ask animated/live for the next few shows with one line of letters.
+    upcoming: show keys in run order. info: show -> (files, bytes). Nothing is saved
+    until you confirm, so a typo just means typing the line again."""
+    width = max(len(Path(s).name) for s in upcoming)
+    while True:
+        print(f"\nNext {len(upcoming)} show(s) need a profile:")
+        for i, show in enumerate(upcoming, 1):
+            n, b = info.get(show, (0, 0))
+            print(f"  {i:2d}. {Path(show).name:<{width}}  {n:4d} file(s), {human(b)}")
+        ans = input(f"Type {len(upcoming)} letters in order, a = animated, l = live "
+                    f"(spaces ok, e.g. {'al' * 2}...): ")
+        letters = ans.replace(" ", "").replace(",", "").lower()
+        if len(letters) != len(upcoming) or set(letters) - {"a", "l"}:
+            bad = "".join(sorted(set(letters) - {"a", "l"}))
+            why = f"'{bad}' is not a or l" if bad else f"got {len(letters)} letters"
+            print(f"  Need exactly {len(upcoming)} letters, each a or l ({why}). Try again.")
+            continue
+        print()
+        for i, (show, c) in enumerate(zip(upcoming, letters), 1):
+            print(f"  {i:2d}. {Path(show).name:<{width}}  {'animated' if c == 'a' else 'live'}")
+        ok = input("Correct? Enter = yes and start, r = type them again: ").strip().lower()
+        if ok in ("", "y", "yes"):
+            for show, c in zip(upcoming, letters):
+                profiles[show] = "animated" if c == "a" else "live"
+            print()
+            return
+
+
 RES_TOKENS = re.compile(r"(?i)(?<![0-9a-z])(4320p|2160p|1440p)(?![0-9a-z])")
 RES_DIMS = re.compile(r"(?<!\d)(\d{4})x(\d{3,4})(?!\d)")
 UHD_TAGS = re.compile(r"(?i)[ ._-]*(?<![0-9a-z])(4k|uhd)(?![0-9a-z])")
@@ -848,6 +877,9 @@ def main():
     ap.add_argument("--encoder", choices=["qsv", "x265"], default="qsv")
     ap.add_argument("--device", default="/dev/dri/renderD128")
     ap.add_argument("--profile", choices=sorted(PROFILES), help="use this profile for every file (no questions)")
+    ap.add_argument("--batch", type=int, default=10, metavar="N",
+                    help="ask animated/live for N shows at a time, convert them, then ask for the next N "
+                         "(0 = ask for every show up front)")
     ap.add_argument("--quality-hd", type=int, help="override the profile's HD quality")
     ap.add_argument("--quality-sd", type=int, help="override the profile's SD quality")
     ap.add_argument("--preset",
@@ -944,11 +976,30 @@ def main():
 
     profiles_file = state_dir / "profiles.json"
     profiles = json.loads(profiles_file.read_text()) if profiles_file.exists() else {}
-    shows = list(dict.fromkeys(show_key(p, args.paths) for p, _ in files))
-    if not args.profile and ask_profiles(shows, profiles, sys.stdin.isatty()):
+    def save_profiles():
         tmp = profiles_file.with_suffix(".tmp")
         tmp.write_text(json.dumps(profiles, indent=1, sort_keys=True))
         tmp.replace(profiles_file)
+
+    batching = (not args.profile and args.batch > 0 and sys.stdin.isatty()
+                and not args.dry_run and not args.sample)
+    show_info = {}
+    for p, sz in files:
+        k = show_key(p, args.paths)
+        c, b = show_info.get(k, (0, 0))
+        show_info[k] = (c + 1, b + sz)
+    if batching:
+        # Work show by show (alphabetical, biggest file first within a show) so each
+        # batch of answers is finished before the next question comes up.
+        files.sort(key=lambda x: (Path(show_key(x[0], args.paths)).name.lower(), -x[1]))
+        unknown = sum(1 for s in show_info if s not in profiles)
+        if unknown:
+            print(f"{unknown} show(s) have no profile yet. I'll ask about {args.batch} at a time, "
+                  f"convert those, then ask about the next {args.batch}.")
+    else:
+        shows = list(dict.fromkeys(show_key(p, args.paths) for p, _ in files))
+        if not args.profile and ask_profiles(shows, profiles, sys.stdin.isatty()):
+            save_profiles()
 
     def file_cfg(path):
         name = args.profile or profiles.get(show_key(path, args.paths), DEFAULT_PROFILE)
@@ -966,6 +1017,16 @@ def main():
         if STOP.now or stop_flag.exists():
             print("\n[stop] Stop requested, finishing here.")
             break
+        if batching and show_key(path, args.paths) not in profiles:
+            upcoming = []
+            for p, _ in files[n - 1:]:
+                k = show_key(p, args.paths)
+                if k not in profiles and k not in upcoming:
+                    upcoming.append(k)
+                    if len(upcoming) == args.batch:
+                        break
+            ask_batch(upcoming, profiles, show_info)
+            save_profiles()
         head = f"[{n}/{len(files)}]"
         print(f"{head} {path}  ({human(size)})")
         t0 = time.time()
