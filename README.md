@@ -42,7 +42,8 @@ install -m 755 tinyclean.py /usr/local/bin/tinyclean
 ## Use
 
 ```
-tinyclean "/data/Episodes"                    # asks animated/live 10 shows at a time
+tinyclean "/data/Episodes"                    # asks how many at once, then animated/live 10 shows at a time
+tinyclean --jobs 3 "/data/Episodes"           # convert 3 files at the same time (remembered)
 tinyclean --profile live "/data/Movies"       # no questions
 tinyclean --sample 3 "/data/Movies/Some Film" # 60 s test clips, projected savings
 tinyclean --dry-run "/data/Episodes/Show"     # show the plan, change nothing
@@ -61,7 +62,7 @@ started, with sizes, so you can review and replace one folder at a time.
 | animated | faster | 24 / 23 |
 | live | faster | 22 / 22 |
 
-Other options: `--batch N`, `--min-free-gb`, `--keep-hdr`, `--keep-sample`,
+Other options: `--jobs N`, `--batch N`, `--min-free-gb`, `--keep-hdr`, `--keep-sample`,
 `--limit`, `--retry-failed`, `--state-dir`, `--check`, `--rename-suffix`.
 Tagging old files needs `mkvpropedit` (`apt install mkvtoolnix`). Ctrl+C stops cleanly; touching
 `~/.tinyclean/STOP` finishes the current file, then stops.

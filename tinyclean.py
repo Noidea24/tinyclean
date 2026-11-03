@@ -45,6 +45,7 @@ import argparse
 import csv
 import fcntl
 import json
+import queue
 import os
 import re
 import shutil
@@ -550,15 +551,16 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, dec
 class Stopper:
     def __init__(self):
         self.now = False
-        self.proc = None
+        self.procs = set()
 
     def handle(self, signum, frame):
         if self.now:
-            sys.exit(130)
+            os._exit(130)
         self.now = True
-        print("\n[stop] Stopping: cleaning up the current file. Press Ctrl+C again to force.", flush=True)
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+        print("\n[stop] Stopping: cleaning up the file(s) in progress. Press Ctrl+C again to force.", flush=True)
+        for proc in list(self.procs):
+            if proc.poll() is None:
+                proc.terminate()
 
 
 STOP = Stopper()
@@ -568,7 +570,7 @@ def run_ffmpeg(cmd, total_seconds, label, progress, src_fps=None):
     """Run ffmpeg, drawing a progress line. Returns (returncode, last stderr lines)."""
     err = deque(maxlen=40)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
-    STOP.proc = proc
+    STOP.procs.add(proc)
 
     def pump_err():
         for line in proc.stderr:
@@ -604,7 +606,7 @@ def run_ffmpeg(cmd, total_seconds, label, progress, src_fps=None):
                 progress(f"{label} {pct:5.1f}%  fps {fps}  speed {speed}  ETA {hms(eta) if eta else '--'}")
     proc.wait()
     t.join(timeout=2)
-    STOP.proc = None
+    STOP.procs.discard(proc)
     return proc.returncode, list(err)
 
 
@@ -1280,9 +1282,9 @@ def write_status(root, echo=False, working_on=None):
     root = Path(root)
     try:
         rows = scan_status(root)
-        if working_on:
+        for w in ([working_on] if isinstance(working_on, (str, Path)) else (working_on or [])):
             try:
-                top = Path(working_on).relative_to(root).parts[0]
+                top = Path(w).relative_to(root).parts[0]
                 if top in rows:
                     rows[top]["busy"] += 1
             except ValueError:
@@ -1340,6 +1342,8 @@ def main():
                     help="copy HDR video untouched (old behaviour) instead of re-encoding it at 1080p")
     ap.add_argument("--keep-sample", action="store_true",
                     help="with --sample: keep the last clip as /data/_tools/tinyclean-sample.mkv")
+    ap.add_argument("--jobs", type=int, metavar="N",
+                    help="convert N files at the same time (asked at start if not given; remembered)")
     ap.add_argument("--batch", type=int, default=10, metavar="N",
                     help="ask animated/live for N shows at a time, convert them, then ask for the next N "
                          "(0 = ask for every show up front)")
@@ -1487,55 +1491,121 @@ def main():
     last_status = 0.0
     # (the first file refreshes the status straight away, marking itself as converting)
     counts = {"done": 0, "kept": 0, "failed": 0}
-    saved = 0
+    totals = {"saved": 0, "done_bytes": 0, "finished": 0}
     run_start = time.time()
     lf = open(ledger, "a", newline="")
     writer = csv.writer(lf)
     if new_ledger:
         writer.writerow(["time", "file", "result", "orig_bytes", "new_bytes", "seconds", "notes"])
 
-    for n, (path, size) in enumerate(files, 1):
-        if STOP.now or stop_flag.exists():
-            print("\n[stop] Stop requested, finishing here.")
-            break
-        if batching and show_key(path, args.paths) not in profiles:
-            upcoming = []
-            for p, _ in files[n - 1:]:
-                k = show_key(p, args.paths)
-                if k not in profiles and k not in upcoming:
-                    upcoming.append(k)
-                    if len(upcoming) == args.batch:
-                        break
-            ask_batch(upcoming, profiles, show_info)
-            save_profiles()
-        head = f"[{n}/{len(files)}]"
-        if not args.dry_run and not args.sample and time.time() - last_status > 120:
-            write_status(status_root, working_on=path)
-            last_status = time.time()
-        print(f"{head} {path}  ({human(size)})")
+    # ---- how many files at once
+    settings_file = state_dir / "settings.json"
+    try:
+        settings = json.loads(settings_file.read_text())
+    except (OSError, ValueError):
+        settings = {}
+    jobs = args.jobs
+    if args.dry_run or args.sample:
+        jobs = 1
+    elif not jobs:
+        last = int(settings.get("jobs", 2))
+        if sys.stdin.isatty():
+            while True:
+                ans = input(f"Convert how many files at the same time? 1-4 [Enter = {last}]: ").strip()
+                if not ans:
+                    jobs = last
+                    break
+                if ans.isdigit() and 1 <= int(ans) <= 4:
+                    jobs = int(ans)
+                    break
+                print("  please type a number from 1 to 4")
+        else:
+            jobs = last
+    jobs = max(1, min(int(jobs), 8))
+    if not (args.dry_run or args.sample):
+        settings["jobs"] = jobs
+        try:
+            settings_file.write_text(json.dumps(settings))
+        except OSError:
+            pass
+        if jobs > 1:
+            print(f"Converting {jobs} files at a time.\n")
+
+    lock = threading.RLock()          # state, ledger, maps, counters, printing
+    inflight = {}                     # slot -> (path, size)
+    slot_text = {}                    # slot -> latest progress text
+    prompting = threading.Event()
+    multi = jobs > 1
+
+    def show_progress():
+        """With several jobs: one combined progress line, redrawn every second."""
+        while not finished_all.is_set():
+            time.sleep(1)
+            if not tty or prompting.is_set():
+                continue
+            with lock:
+                bits = []
+                for slot in sorted(inflight):
+                    t = slot_text.get(slot, "")
+                    m = re.search(r"([\d.]+)%.*?speed (\S+).*?ETA (\S+)", t)
+                    name = inflight[slot][0].stem[:18]
+                    bits.append(f"{name}: {m.group(1)}% {m.group(2)} ETA {m.group(3)}" if m else f"{name}: starting")
+                if bits:
+                    cols = shutil.get_terminal_size((120, 20)).columns
+                    line = "  " + "  |  ".join(bits)
+                    print("\r" + line[:cols - 1].ljust(cols - 1), end="", flush=True)
+
+    finished_all = threading.Event()
+
+    def emit(lines):
+        """Print a finished file's block without tearing the progress line."""
+        with lock:
+            if multi and tty:
+                cols = shutil.get_terminal_size((120, 20)).columns
+                print("\r" + " " * (cols - 1) + "\r", end="")
+            print("\n".join(lines), flush=True)
+
+    def process(n, path, size, slot):
+        out = []
+
+        def say(line=""):
+            if multi:
+                out.append(line)
+            else:
+                print(line, flush=True)
+
+        def prog(text):
+            if multi:
+                slot_text[slot] = text
+            else:
+                progress(text)
+
+        say(f"[{n}/{len(files)}] {path}  ({human(size)})")
         t0 = time.time()
         try:
             info = ffprobe(cfg["ffprobe"], path)
             if has_tag(info):
-                print(f"  [skip] already made by tinyclean ({tag_of(info)}), just renamed\n")
+                say(f"  [skip] already made by tinyclean ({tag_of(info)}), just renamed\n")
                 if not args.dry_run and not args.sample:
-                    state[str(path)] = {"status": "tagged", "mtime": int(path.stat().st_mtime)}
-                    save_state()
-                continue
+                    with lock:
+                        state[str(path)] = {"status": "tagged", "mtime": int(path.stat().st_mtime)}
+                        save_state()
+                return out
             fcfg = file_cfg(path)
             plan = plan_file(path, info, fcfg)
         except Exception as exc:  # noqa: BLE001
-            print(f"  [skip] cannot read: {exc}\n")
-            counts["failed"] += 1
-            if not args.dry_run and not args.sample:
-                state[str(path)] = {"status": "unreadable", "mtime": int(path.stat().st_mtime), "reason": str(exc)}
-                save_state()
-            continue
-        print(describe(plan))
+            say(f"  [skip] cannot read: {exc}\n")
+            with lock:
+                counts["failed"] += 1
+                if not args.dry_run and not args.sample:
+                    state[str(path)] = {"status": "unreadable", "mtime": int(path.stat().st_mtime), "reason": str(exc)}
+                    save_state()
+            return out
+        say(describe(plan))
 
         if args.dry_run:
-            print()
-            continue
+            say()
+            return out
 
         clean = path.parent / CLEAN_DIR
         out_path = clean / f"{TEMP_PREFIX}{path.stem}{SUFFIX}.mkv"
@@ -1550,7 +1620,7 @@ def main():
             for decode, rate, lp in variants(plan, fcfg, mode):
                 cmd = build_cmd(plan, fcfg, sample_out, mode, rate_mode=rate, sample=(start, length),
                                 decode=decode, low_power=lp)
-                rc, err = run_ffmpeg(cmd, length, f"  sample ({decode} decode{', low-power' if lp else ''})", progress, plan.get("fps"))
+                rc, err = run_ffmpeg(cmd, length, f"  sample ({decode} decode{', low-power' if lp else ''})", prog, plan.get("fps"))
                 if rc == 0 or STOP.now:
                     if rc == 0 and mode == "encode":
                         WORKED[:] = [(rate, lp)]
@@ -1558,32 +1628,27 @@ def main():
             if tty:
                 print()
             if rc != 0:
-                print("  sample failed: " + (err[-1] if err else f"exit {rc}") + "\n")
-                continue
+                say("  sample failed: " + (err[-1] if err else f"exit {rc}") + "\n")
+                return out
             if mode == "encode" and plan["hdr"]:
-                print(f"  hdr   : {hdr_report(cfg, plan, sample_out)[1]}")
+                say(f"  hdr   : {hdr_report(cfg, plan, sample_out)[1]}")
             ratio = sample_out.stat().st_size / (size * length / plan["duration"]) if plan["duration"] else 0
-            print(f"  projected size: {ratio * 100:.0f}% of original (~{human(size * ratio)}, saves ~{human(size * (1 - ratio))})\n")
+            say(f"  projected size: {ratio * 100:.0f}% of original (~{human(size * ratio)}, saves ~{human(size * (1 - ratio))})\n")
             if args.keep_sample:
                 keep_dir = Path("/data/_tools") if Path("/data/_tools").is_dir() else state_dir
                 kept = keep_dir / f"{path.stem}-sample.mkv"
                 shutil.move(str(sample_out), str(kept))
-                print(f"  sample kept: {kept}\n")
+                say(f"  sample kept: {kept}\n")
             sample_out.unlink(missing_ok=True)
-            continue
+            return out
 
-        free = shutil.disk_usage(path.parent).free
-        if free - size < cfg["min_free_gb"] * 1024 ** 3:
-            print(f"\n[stop] Only {human(free)} free on the NAS; a copy of this file could push it under "
-                  f"{cfg['min_free_gb']} GB. Clear some space (or lower --min-free-gb) and run again.")
-            break
-        created_clean = False
-        created_clean = clean_dir_for(path)
+        with lock:
+            created_clean = clean_dir_for(path)
 
         attempts = [plan["video_mode"]]
         if plan["video_mode"] == "encode":
-            attempts.append("copy")            # fallback if the re-encode is not smaller
-        result, notes, new_size = None, [], 0
+            attempts.append("copy")            # fallback if the re-encode is too big
+        result, notes, new_size, mode = None, [], 0, plan["video_mode"]
         for mode in attempts:
             # Every file gets a verified Clean copy, even one that already meets the
             # rules (then it is a straight remux: same streams, new container and name).
@@ -1593,17 +1658,19 @@ def main():
                 label = f"  {'encoding' if mode == 'encode' else 'remuxing'}"
                 if mode == "encode" and cfg["encoder"] == "qsv":
                     label += f" ({decode} decode{', low-power' if lp else ''})"
-                rc, err = run_ffmpeg(cmd, plan["duration"], label, progress, plan.get("fps"))
-                if tty:
+                rc, err = run_ffmpeg(cmd, plan["duration"], label, prog, plan.get("fps"))
+                if tty and not multi:
                     print()
                 if rc == 0 or STOP.now:
                     if rc == 0 and mode == "encode" and cfg["encoder"] == "qsv":
                         WORKED[:] = [(rate, lp)]
+                    if rc == 0 and multi:
+                        say(f"{label} done at {(slot_text.get(slot, '').split('speed ')[-1].split()[0] if 'speed ' in slot_text.get(slot, '') else '?')}")
                     break
                 notes.append(f"retry: {decode}/{rate}{'/lp' if lp else ''} attempt failed ({(err[-1] if err else 'exit ' + str(rc))[:120]})")
             if STOP.now:
                 out_path.unlink(missing_ok=True)
-                break
+                return out
             if rc != 0:
                 notes.append(f"{mode} failed: {(err[-1] if err else 'exit ' + str(rc))[:200]}")
                 out_path.unlink(missing_ok=True)
@@ -1617,15 +1684,12 @@ def main():
             if mode == "copy" or new_size <= size * cfg["max_growth"]:
                 result = "done"
                 if mode == "copy" and plan["video_mode"] == "encode":
-                    print(f"  note  : re-encode came out too big, kept the original "
-                          f"{plan['video'].get('codec_name')} video")
+                    say(f"  note  : re-encode came out too big, kept the original "
+                        f"{plan['video'].get('codec_name')} video")
                 break
             notes.append(f"{mode} gave {human(new_size)} vs {human(size)}, more than "
                          f"{(cfg['max_growth'] - 1) * 100:.0f}% bigger")
             out_path.unlink(missing_ok=True)
-
-        if STOP.now:
-            break
 
         mtime = int(path.stat().st_mtime)
         if result == "done" and mode == "encode" and (plan["needs_scale"] or plan["dovi"]):
@@ -1634,57 +1698,137 @@ def main():
                 stem = DV_TOKENS.sub("", stem).strip(" ._-") or stem
             final_path = clean / f"{stem}{SUFFIX}.mkv"
         if result == "done" and mode == "encode" and plan["hdr"]:
-            print(f"  hdr   : {hdr_report(cfg, plan, out_path)[1]}")
-        if result == "done":
-            if final_path.exists():
-                print(f"  [skip] {final_path.name} already exists in Clean, leaving it\n")
-                out_path.unlink(missing_ok=True)
+            say(f"  hdr   : {hdr_report(cfg, plan, out_path)[1]}")
+        with lock:
+            if result == "done":
+                if final_path.exists():
+                    say(f"  [skip] {final_path.name} already exists in Clean, leaving it\n")
+                    out_path.unlink(missing_ok=True)
+                    counts["failed"] += 1
+                    return out
+                os.replace(out_path, final_path)
+                mapping = read_map(clean)
+                mapping[final_path.name] = path.name
+                write_map(clean, mapping)
+                totals["saved"] += size - new_size
+                counts["done"] += 1
+                state[str(path)] = {"status": "done", "mtime": mtime, "orig": size, "new": new_size}
+                change = (1 - new_size / size) * 100
+                how = (f"{change:.0f}% smaller" if change >= 0.5 else
+                       f"{-change:.0f}% bigger" if change <= -0.5 else "same size, remuxed")
+                say(f"  [done] {human(size)} -> {human(new_size)} ({how}), saved as Clean/{final_path.name}")
+            else:
+                result = "failed"
                 counts["failed"] += 1
-                continue
-            os.replace(out_path, final_path)
-            mapping = read_map(clean)
-            mapping[final_path.name] = path.name
-            write_map(clean, mapping)
-            saved += size - new_size
-            counts["done"] += 1
-            state[str(path)] = {"status": "done", "mtime": mtime, "orig": size, "new": new_size}
-            change = (1 - new_size / size) * 100
-            how = (f"{change:.0f}% smaller" if change >= 0.5 else
-                   f"{-change:.0f}% bigger" if change <= -0.5 else "same size, remuxed")
-            print(f"  [done] {human(size)} -> {human(new_size)} ({how}), saved as Clean/{final_path.name}")
-        elif all("not worth it" in x or x.startswith("retry:") for x in notes):
-            result, new_size = "fine", size
-            counts["kept"] += 1
-            state[str(path)] = {"status": "fine", "mtime": mtime, "orig": size}
-            print("  [fine] Already meets the rules and could not be shrunk; no copy made.")
-        else:
-            result = "failed"
-            counts["failed"] += 1
-            state[str(path)] = {"status": "failed", "mtime": mtime, "reason": "; ".join(notes)}
-            print("  [FAILED] " + "; ".join(notes))
-        save_state()
-        write_readme(path.parent, state)
-        # Remove a Clean folder this file's run created but left with nothing in it.
-        if created_clean and result != "done" and clean.is_dir() and not any(p.suffix == ".mkv" and not p.name.startswith(".") for p in clean.iterdir()) \
-                and not any(v.get("status") == "done" for k, v in state.items() if Path(k).parent == path.parent):
-            shutil.rmtree(clean, ignore_errors=True)
+                state[str(path)] = {"status": "failed", "mtime": mtime, "reason": "; ".join(notes)}
+                say("  [FAILED] " + "; ".join(notes))
+            save_state()
+            write_readme(path.parent, state)
+            # Remove a Clean folder this file's run created but left with nothing in it.
+            if created_clean and result != "done" and clean.is_dir() \
+                    and not any(p.suffix == ".mkv" for p in clean.iterdir()) \
+                    and not any(v.get("status") == "done" for k, v in state.items() if Path(k).parent == path.parent):
+                shutil.rmtree(clean, ignore_errors=True)
+            secs = time.time() - t0
+            writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), str(path), result, size, new_size,
+                             int(secs), "; ".join(notes)])
+            lf.flush()
+            totals["done_bytes"] += size
+            totals["finished"] += 1
+            elapsed = time.time() - run_start
+            eta = elapsed / totals["done_bytes"] * (total_bytes - totals["done_bytes"]) if totals["done_bytes"] else 0
+            say(f"  overall: {totals['finished']}/{len(files)} files, saved {human(totals['saved'])} so far, "
+                f"est. {hms(eta)} left for the rest\n")
+        return out
 
-        secs = time.time() - t0
-        writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), str(path), result, size, new_size,
-                         int(secs), "; ".join(notes)])
-        lf.flush()
-        done_bytes = sum(s for _, s in files[:n])
-        elapsed = time.time() - run_start
-        eta = elapsed / done_bytes * (total_bytes - done_bytes) if done_bytes else 0
-        print(f"  overall: {n}/{len(files)} files, saved {human(saved)} so far, "
-              f"est. {hms(eta)} left for the rest\n")
+    def worker(n, path, size, slot):
+        try:
+            lines = process(n, path, size, slot)
+        except Exception as exc:  # noqa: BLE001
+            lines = [f"[{n}/{len(files)}] {path}", f"  [FAILED] unexpected error: {exc}\n"]
+        finally:
+            with lock:
+                inflight.pop(slot, None)
+                slot_text.pop(slot, None)
+            free_slots.put(slot)
+        if multi and lines:
+            emit(lines)
+
+    free_slots = queue.Queue()
+    for i in range(1, jobs + 1):
+        free_slots.put(i)
+    threads = []
+    ticker = threading.Thread(target=show_progress, daemon=True)
+    if multi:
+        ticker.start()
+
+    stopped_for_space = False
+    for n, (path, size) in enumerate(files, 1):
+        if STOP.now or stop_flag.exists():
+            emit(["\n[stop] Stop requested; letting the file(s) in progress finish." if stop_flag.exists() and not STOP.now
+                  else "\n[stop] Stop requested."])
+            break
+        # Wait for a free slot (so prompts and space checks happen just before a file starts).
+        slot = None
+        while slot is None:
+            try:
+                slot = free_slots.get(timeout=1)
+            except queue.Empty:
+                if STOP.now:
+                    break
+        if slot is None:
+            break
+        if batching and show_key(path, args.paths) not in profiles:
+            upcoming = []
+            for p, _ in files[n - 1:]:
+                k = show_key(p, args.paths)
+                if k not in profiles and k not in upcoming:
+                    upcoming.append(k)
+                    if len(upcoming) == args.batch:
+                        break
+            prompting.set()
+            with lock:
+                if multi and tty:
+                    print()
+                ask_batch(upcoming, profiles, show_info)
+                save_profiles()
+            prompting.clear()
+        if not args.dry_run and not args.sample:
+            with lock:
+                reserved = sum(sz for _, sz in inflight.values())
+            free = shutil.disk_usage(path.parent).free
+            if free - reserved - size < cfg["min_free_gb"] * 1024 ** 3:
+                emit([f"\n[stop] Only {human(free)} free on the NAS; another copy could push it under "
+                      f"{cfg['min_free_gb']} GB. Clear some space (or lower --min-free-gb) and run again."])
+                free_slots.put(slot)
+                stopped_for_space = True
+                break
+        with lock:
+            inflight[slot] = (path, size)
+            if not args.dry_run and not args.sample and time.time() - last_status > 120:
+                write_status(status_root, working_on=[p for p, _ in inflight.values()])
+                last_status = time.time()
+        if multi:
+            emit([f"[{n}/{len(files)}] started: {path.name}  ({human(size)})"])
+            t = threading.Thread(target=worker, args=(n, path, size, slot), daemon=True)
+            t.start()
+            threads.append(t)
+        else:
+            worker(n, path, size, slot)
+    for t in threads:
+        while t.is_alive():
+            t.join(timeout=1)
+    finished_all.set()
+    if multi and tty:
+        print()
 
     lf.close()
     if not args.dry_run and not args.sample:
         write_status(status_root)
         print("=" * 60)
-        print(f"Converted {counts['done']}, already fine {counts['kept']}, failed/skipped {counts['failed']}.")
-        print(f"Space the Clean copies would save once originals are removed: {human(saved)}")
+        print(f"Converted {counts['done']}, failed/skipped {counts['failed']}."
+              + (" Stopped early to protect free space." if stopped_for_space else ""))
+        print(f"Space the Clean copies would save once originals are removed: {human(totals['saved'])}")
         print(f"Ledger: {ledger}")
         print(f"Status of every show/movie: {status_root / STATUS_NAME}")
         if counts["done"]:
