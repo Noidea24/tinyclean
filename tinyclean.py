@@ -351,7 +351,7 @@ def plan_file(path, info, cfg):
 # -------------------------------------------------------------- ffmpeg cmd --
 
 
-def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, decode="cpu"):
+def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, decode="cpu", low_power=False):
     v = plan["video"]
     cmd = [cfg["ffmpeg"], "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
            "-nostats", "-progress", "pipe:1", "-fflags", "+genpts"]
@@ -395,6 +395,8 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, dec
                 cmd += ["-vf", ",".join(filters)]
             cmd += ["-c:v", "hevc_qsv", "-preset", cfg["preset"],
                     "-profile:v", "main10" if plan["ten_bit"] else "main"]
+            if low_power:
+                cmd += ["-low_power", "1"]
             # ICQ (constant quality) first; CQP if the driver refuses ICQ.
             cmd += ["-global_quality", str(q)] if rate_mode == "icq" else ["-q:v", str(q)]
         else:  # software x265, for testing or a no-GPU box
@@ -512,6 +514,9 @@ def verify(cfg, plan, out_path, sample_len=None):
 # ---------------------------------------------------------------- library --
 
 
+ALREADY_DONE = []
+
+
 def find_files(roots, cfg, state):
     skip_dir = re.compile(r"^[._@#]")
     min_age = time.time() - cfg["min_age_minutes"] * 60
@@ -533,7 +538,8 @@ def find_files(roots, cfg, state):
             if p.stem.lower().endswith(SUFFIX.lower()):
                 continue
             if (p.parent / CLEAN_DIR / f"{p.stem}{SUFFIX}.mkv").exists():
-                continue                      # already has a Clean copy
+                ALREADY_DONE.append(p)        # already has a Clean copy
+                continue
             try:
                 st = p.stat()
             except OSError:
@@ -548,7 +554,9 @@ def find_files(roots, cfg, state):
     return items
 
 
-def clean_stale_temps(roots):
+def find_unfinished(roots):
+    """Hidden temp files: a conversion in progress elsewhere, or left over from a crash."""
+    found = []
     for root in roots:
         root = Path(root)
         if root.is_file():
@@ -556,11 +564,20 @@ def clean_stale_temps(roots):
         for dirpath, _, filenames in os.walk(root):
             for name in filenames:
                 if name.startswith(TEMP_PREFIX):
-                    try:
-                        os.remove(os.path.join(dirpath, name))
-                        print(f"[cleanup] removed stale temp file {name}")
-                    except OSError:
-                        pass
+                    found.append(Path(dirpath) / name)
+    return found
+
+
+def original_for_temp(temp):
+    """The original video a Clean/.tinyclean.<stem>-Clean.mkv temp file belongs to."""
+    stem = temp.name[len(TEMP_PREFIX):]
+    if stem.endswith(SUFFIX + ".mkv"):
+        stem = stem[:-len(SUFFIX + ".mkv")]
+    folder = temp.parent.parent if temp.parent.name == CLEAN_DIR else temp.parent
+    for p in folder.iterdir() if folder.is_dir() else []:
+        if p.is_file() and p.stem == stem and p.suffix.lower() in VIDEO_EXTS:
+            return p
+    return None
 
 
 def clean_dir_for(path):
@@ -653,12 +670,20 @@ def ask_profiles(shows, profiles, interactive):
     return True
 
 
+WORKED = []   # the (rate, low_power) combination that last succeeded, tried first next time
+
+
 def variants(plan, cfg, mode):
-    """Ways to try an encode, best first: GPU decode, then CPU decode; ICQ, then CQP."""
+    """Ways to try an encode, best first: GPU decode then CPU decode; ICQ then CQP;
+    normal then low-power encoder (newer Intel chips such as the N100 may need it)."""
     if mode != "encode" or cfg["encoder"] != "qsv":
-        return [("cpu", "icq")]
+        return [("cpu", "icq", False)]
     decodes = ["gpu", "cpu"] if plan["gpu_decode"] else ["cpu"]
-    return [(d, r) for d in decodes for r in ("icq", "cqp")]
+    combos = [("icq", False), ("cqp", False), ("icq", True), ("cqp", True)]
+    if WORKED:
+        combos.remove(WORKED[0])
+        combos.insert(0, WORKED[0])
+    return [(d, r, lp) for d in decodes for r, lp in combos]
 
 
 def describe(plan):
@@ -735,14 +760,34 @@ def main():
         tmp.write_text(json.dumps(state, indent=1))
         tmp.replace(state_file)
 
+    in_progress = set()
     if not args.dry_run and not args.sample:
-        clean_stale_temps(args.paths)
+        unfinished = find_unfinished(args.paths)
+        if unfinished:
+            print(f"Found {len(unfinished)} unfinished conversion(s): another worker is busy with them, "
+                  f"or a run stopped without cleaning up:")
+            for t in unfinished:
+                print(f"  {t.parent}/{t.name[len(TEMP_PREFIX):]}")
+            redo = False
+            if sys.stdin.isatty():
+                redo = input("Delete these temp files and convert those videos again? [y/N] ").strip().lower() == "y"
+            if redo:
+                for t in unfinished:
+                    t.unlink(missing_ok=True)
+                print("Removed. They will be converted again.\n")
+            else:
+                in_progress = {o for o in map(original_for_temp, unfinished) if o}
+                print("Leaving them alone and skipping those videos this run.\n")
     files = find_files(args.paths, cfg, {} if (args.dry_run or args.sample) else state)
+    if in_progress:
+        files = [(p, sz) for p, sz in files if p not in in_progress]
     if args.sample:
         files = files[:args.sample]
     elif args.limit:
         files = files[:args.limit]
     total_bytes = sum(s for _, s in files)
+    if ALREADY_DONE:
+        print(f"{len(ALREADY_DONE)} file(s) already have a Clean copy and are skipped.")
     print(f"{len(files)} file(s) to look at, {human(total_bytes)} in total.\n")
 
     profiles_file = state_dir / "profiles.json"
@@ -799,10 +844,13 @@ def main():
             sample_out = state_dir / "sample.mkv"
             mode = plan["video_mode"]
             rc, err = 1, []
-            for decode, rate in variants(plan, fcfg, mode):
-                cmd = build_cmd(plan, fcfg, sample_out, mode, rate_mode=rate, sample=(start, length), decode=decode)
-                rc, err = run_ffmpeg(cmd, length, f"  sample ({decode} decode)", progress)
+            for decode, rate, lp in variants(plan, fcfg, mode):
+                cmd = build_cmd(plan, fcfg, sample_out, mode, rate_mode=rate, sample=(start, length),
+                                decode=decode, low_power=lp)
+                rc, err = run_ffmpeg(cmd, length, f"  sample ({decode} decode{', low-power' if lp else ''})", progress)
                 if rc == 0 or STOP.now:
+                    if rc == 0 and mode == "encode":
+                        WORKED[:] = [(rate, lp)]
                     break
             if tty:
                 print()
@@ -831,17 +879,19 @@ def main():
             if mode == "copy" and not plan["rule_change"]:
                 break                          # nothing to gain from a copy pass
             rc, err = 1, []
-            for decode, rate in variants(plan, fcfg, mode):
-                cmd = build_cmd(plan, fcfg, out_path, mode, rate_mode=rate, decode=decode)
+            for decode, rate, lp in variants(plan, fcfg, mode):
+                cmd = build_cmd(plan, fcfg, out_path, mode, rate_mode=rate, decode=decode, low_power=lp)
                 label = f"  {'encoding' if mode == 'encode' else 'remuxing'}"
                 if mode == "encode" and cfg["encoder"] == "qsv":
-                    label += f" ({decode} decode)"
+                    label += f" ({decode} decode{', low-power' if lp else ''})"
                 rc, err = run_ffmpeg(cmd, plan["duration"], label, progress)
                 if tty:
                     print()
                 if rc == 0 or STOP.now:
+                    if rc == 0 and mode == "encode" and cfg["encoder"] == "qsv":
+                        WORKED[:] = [(rate, lp)]
                     break
-                notes.append(f"retry: {decode}/{rate} attempt failed ({(err[-1] if err else 'exit ' + str(rc))[:120]})")
+                notes.append(f"retry: {decode}/{rate}{'/lp' if lp else ''} attempt failed ({(err[-1] if err else 'exit ' + str(rc))[:120]})")
             if STOP.now:
                 out_path.unlink(missing_ok=True)
                 break
