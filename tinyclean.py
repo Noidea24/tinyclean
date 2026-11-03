@@ -614,6 +614,14 @@ def verify(cfg, plan, out_path, sample_len=None):
 ALREADY_DONE = []
 
 
+def has_clean_copy(p):
+    """True only if a Clean copy of original p actually exists on disk."""
+    clean = p.parent / CLEAN_DIR
+    if (clean / f"{p.stem}{SUFFIX}.mkv").exists():
+        return True
+    return any(orig == p.name and (clean / copy).exists() for copy, orig in read_map(clean).items())
+
+
 def find_files(roots, cfg, state, include_done=False):
     skip_dir = re.compile(r"^[._@#]")
     min_age = time.time() - cfg["min_age_minutes"] * 60
@@ -634,8 +642,7 @@ def find_files(roots, cfg, state, include_done=False):
                 continue
             if p.stem.lower().endswith(SUFFIX.lower()):
                 continue
-            if not include_done and ((p.parent / CLEAN_DIR / f"{p.stem}{SUFFIX}.mkv").exists() or
-                                     p.name in read_map(p.parent / CLEAN_DIR).values()):
+            if not include_done and has_clean_copy(p):
                 ALREADY_DONE.append(p)        # already has a Clean copy
                 continue
             try:
