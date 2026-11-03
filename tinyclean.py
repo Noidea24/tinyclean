@@ -3,8 +3,9 @@
 tinyclean - shrink and normalize a media library for TV playback.
 
 Rules (in order of what matters most):
-  Audio     ONE track. English if there is one (commentary skipped), otherwise
-            the file's main track. Stereo is kept as-is when it is already a
+  Audio     One English track and one Japanese track, whichever exist
+            (commentary skipped); if neither exists, the file's main track.
+            Each kept track follows the same rule. Stereo is kept as-is when it is already a
             TV-friendly codec (AAC, AC3, E-AC3, MP3). Surround is replaced by a
             "night mode" stereo downmix: centre (dialogue) weighted up, LFE
             dropped, then loudness-levelled so quiet talk and loud action end up
@@ -17,11 +18,15 @@ Rules (in order of what matters most):
   Video     H.265 on Intel Quick Sync. 4K is scaled to 1080p. Interlaced DVD
             material is deinterlaced. 10-bit sources stay 10-bit. HDR video and
             already-efficient H.265/AV1 are copied, not re-encoded.
-  Safety    Output is written next to the source as a hidden temp file, checked
-            (duration, streams), and only kept if it is smaller (or if the
-            stereo rule required the change). Originals are moved to a
-            quarantine folder on the same share, not deleted, unless asked.
-  Naming    <original name>-Clean.mkv. Files already ending in -Clean are done.
+  Safety    Originals are never touched. Output goes to a "Clean" folder next to
+            the source, written as a hidden temp file, checked (duration,
+            streams), and only kept if it is smaller (or if the stereo rule
+            required the change). Each Clean folder gets a README listing what
+            happened to every file, plus .plexignore / .ignore so Plex and
+            Jellyfin don't show the copies while you inspect them. A run stops
+            before the NAS gets too full (--min-free-gb).
+  Naming    <folder>/Clean/<original name>-Clean.mkv. Files already ending in
+            -Clean, and files that already have a Clean copy, are skipped.
 
 Runs as a normal user that can write to the library. State, log and a CSV
 ledger live in --state-dir. Ctrl+C stops cleanly (temp file removed). Touch
@@ -51,6 +56,9 @@ VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts",
 TEMP_PREFIX = ".tinyclean."
 STEREO_COPY_CODECS = {"aac", "ac3", "eac3", "mp3"}
 ENGLISH = {"eng", "en", "english"}
+JAPANESE = {"jpn", "ja", "japanese"}
+KEEP_AUDIO = [("English", ENGLISH), ("Japanese", JAPANESE)]   # kept in this order
+CLEAN_DIR = "Clean"
 UNTAGGED = {"", "und", "unk", "unknown", "none", "zxx"}
 TEXT_SUB_CONVERT = {"mov_text": "srt"}          # codec -> target for MKV
 DROP_SUB_CODECS = {"eia_608", "none", ""}       # not storable / not real subs
@@ -65,6 +73,7 @@ DEFAULTS = {
     "min_saving": 0.05,      # a re-encode must save at least 5% to be kept
     "audio_bitrate": "192k",
     "min_age_minutes": 60,   # skip files touched in the last hour (imports in progress)
+    "min_free_gb": 100,      # stop before free space on the NAS drops below this
 }
 
 # ------------------------------------------------------------- small helpers --
@@ -203,25 +212,28 @@ def nightmode_filter(stream):
 
 
 def pick_audio(streams):
-    """Choose the single audio stream to keep."""
+    """Choose the audio streams to keep: one per wanted language, else the main track."""
     audio = [s for s in streams if s.get("codec_type") == "audio"]
     if not audio:
-        return None, "no audio"
+        return []
 
     def main_tracks(group):
         mains = [s for s in group if "commentary" not in title_of(s) and not disp(s, "comment")]
         return mains or group
 
-    eng = [s for s in audio if is_english(s)]
-    if eng:
-        pool, why = main_tracks(eng), "English"
-    else:
-        pool = main_tracks(audio)
-        default = [s for s in pool if disp(s, "default")]
-        pool, why = (default or pool), "no English track, using main track"
-    # Within the pool: an existing stereo/mono track beats a surround one.
-    small = [s for s in pool if int(s.get("channels", 2)) <= 2]
-    return (small[0] if small else pool[0]), why
+    def best(group):
+        # An existing stereo/mono track beats a surround one; then the default-flagged one.
+        group = sorted(group, key=lambda s: (int(s.get("channels", 2)) > 2, not disp(s, "default")))
+        return group[0]
+
+    kept = []
+    for name, codes in KEEP_AUDIO:
+        group = [s for s in audio if lang_of(s) in codes]
+        if group:
+            kept.append((best(main_tracks(group)), name))
+    if not kept:
+        kept.append((best(main_tracks(audio)), "main track (no English/Japanese)"))
+    return kept
 
 
 def pick_subs(streams):
@@ -276,18 +288,22 @@ def plan_file(path, info, cfg):
         video_why = f"{v.get('codec_name')} {w}x{h} {bpp:.3f} bpp -> H.265 (" + ", ".join(bits) + ")"
 
     # ---- audio
-    a, a_why = pick_audio(streams)
-    audio = None
-    if a is not None:
+    audio = []
+    for a, a_why in pick_audio(streams):
         ch = int(a.get("channels", 2))
         if ch <= 2 and a.get("codec_name") in STEREO_COPY_CODECS:
-            audio = {"stream": a, "mode": "copy", "why": f"{a_why}: copy {a.get('codec_name')} {ch}ch"}
+            audio.append({"stream": a, "mode": "copy", "why": f"{a_why}: copy {a.get('codec_name')} {ch}ch"})
         elif ch <= 2:
-            audio = {"stream": a, "mode": "aac", "why": f"{a_why}: {a.get('codec_name')} {ch}ch -> AAC"}
+            audio.append({"stream": a, "mode": "aac", "why": f"{a_why}: {a.get('codec_name')} {ch}ch -> AAC"})
         else:
             filt, what = nightmode_filter(a)
-            audio = {"stream": a, "mode": "downmix", "filter": filt,
-                     "why": f"{a_why}: {a.get('codec_name')} {ch}ch -> AAC stereo, {what}"}
+            audio.append({"stream": a, "mode": "downmix", "filter": filt,
+                          "why": f"{a_why}: {a.get('codec_name')} {ch}ch -> AAC stereo, {what}"})
+    # Default track: whichever kept track the source had as default, else the first.
+    if audio:
+        defaults = [i for i, a in enumerate(audio) if disp(a["stream"], "default")]
+        for i, a in enumerate(audio):
+            a["default"] = i == (defaults[0] if defaults else 0)
 
     # ---- subtitles
     subs, s_why = pick_subs(streams)
@@ -297,7 +313,7 @@ def plan_file(path, info, cfg):
 
     # Does the file break a rule even if the video is fine?
     rule_change = (
-        (audio and audio["mode"] != "copy") or audio_count > 1
+        any(a["mode"] != "copy" for a in audio) or audio_count > len(audio)
         or len(subs) != len(all_subs) or any(s.get("codec_name") in TEXT_SUB_CONVERT for s in subs)
         or path.suffix.lower() != ".mkv")
 
@@ -306,7 +322,7 @@ def plan_file(path, info, cfg):
         "video_why": video_why, "hdr": hdr, "ten_bit": ten_bit, "needs_scale": needs_scale,
         "interlaced": interlaced, "height": h, "audio": audio, "subs": subs, "subs_why": s_why,
         "subs_dropped": len(all_subs) - len(subs), "attachments": attachments,
-        "rule_change": rule_change, "audio_required": bool(audio and audio["mode"] == "downmix"),
+        "rule_change": rule_change, "audio_required": any(a["mode"] == "downmix" for a in audio),
     }
 
 
@@ -329,8 +345,8 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None):
         cmd += ["-t", str(sample[1])]
 
     cmd += ["-map", f"0:{v['index']}"]
-    if plan["audio"]:
-        cmd += ["-map", f"0:{plan['audio']['stream']['index']}"]
+    for a in plan["audio"]:
+        cmd += ["-map", f"0:{a['stream']['index']}"]
     for s in plan["subs"]:
         cmd += ["-map", f"0:{s['index']}"]
     if plan["attachments"]:
@@ -359,16 +375,16 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None):
     else:
         cmd += ["-c:v", "copy"]
 
-    # audio
-    a = plan["audio"]
-    if a:
+    # audio: each kept track gets its own settings
+    for i, a in enumerate(plan["audio"]):
         if a["mode"] == "copy":
-            cmd += ["-c:a", "copy"]
+            cmd += [f"-c:a:{i}", "copy"]
         elif a["mode"] == "aac":
-            cmd += ["-c:a", "aac", "-b:a", cfg["audio_bitrate"]]
+            cmd += [f"-c:a:{i}", "aac", f"-b:a:{i}", cfg["audio_bitrate"]]
         else:
-            cmd += ["-filter:a", a["filter"], "-c:a", "aac", "-b:a", cfg["audio_bitrate"], "-ac", "2"]
-        cmd += ["-disposition:a:0", "default"]
+            cmd += [f"-filter:a:{i}", a["filter"], f"-c:a:{i}", "aac",
+                    f"-b:a:{i}", cfg["audio_bitrate"], f"-ac:a:{i}", "2"]
+        cmd += [f"-disposition:a:{i}", "default" if a["default"] else "0"]
 
     # subtitles: copy, converting MP4 text subs. Only forced tracks are
     # marked default, so full subtitles never switch themselves on.
@@ -448,10 +464,10 @@ def verify(cfg, plan, out_path, sample_len=None):
     streams = info.get("streams", [])
     if not any(s.get("codec_type") == "video" for s in streams):
         return False, "no video in output"
-    want_audio = 1 if plan["audio"] else 0
+    want_audio = len(plan["audio"])
     got_audio = sum(1 for s in streams if s.get("codec_type") == "audio")
     if got_audio != want_audio:
-        return False, f"expected {want_audio} audio track, got {got_audio}"
+        return False, f"expected {want_audio} audio track(s), got {got_audio}"
     got_subs = sum(1 for s in streams if s.get("codec_type") == "subtitle")
     if got_subs != len(plan["subs"]):
         return False, f"expected {len(plan['subs'])} subtitle tracks, got {got_subs}"
@@ -478,7 +494,8 @@ def find_files(roots, cfg, state):
         else:
             candidates = []
             for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = sorted(d for d in dirnames if not skip_dir.match(d))
+                dirnames[:] = sorted(d for d in dirnames
+                                     if not skip_dir.match(d) and d.lower() != CLEAN_DIR.lower())
                 for name in filenames:
                     candidates.append(Path(dirpath) / name)
         for p in candidates:
@@ -486,6 +503,8 @@ def find_files(roots, cfg, state):
                 continue
             if p.stem.lower().endswith(SUFFIX.lower()):
                 continue
+            if (p.parent / CLEAN_DIR / f"{p.stem}{SUFFIX}.mkv").exists():
+                continue                      # already has a Clean copy
             try:
                 st = p.stat()
             except OSError:
@@ -515,13 +534,38 @@ def clean_stale_temps(roots):
                         pass
 
 
-def quarantine_target(cfg, src):
-    base = Path(cfg["library_base"])
-    try:
-        rel = src.relative_to(base)
-    except ValueError:
-        rel = Path(src.name)
-    return Path(cfg["originals"]) / rel
+def clean_dir_for(path):
+    """Create <folder>/Clean with ignore files so Plex/Jellyfin skip the copies."""
+    d = path.parent / CLEAN_DIR
+    if d.exists():
+        return False
+    d.mkdir()
+    (d / ".plexignore").write_text("*\n")
+    (d / ".ignore").write_text("")
+    return True
+
+
+def write_readme(folder, state):
+    """Rewrite <folder>/Clean/README-tinyclean.txt from the state of every file in folder."""
+    d = folder / CLEAN_DIR
+    if not d.is_dir():
+        return
+    lines = ["tinyclean results for this folder. Originals are untouched.",
+             "converted   = a smaller -Clean copy is in this folder",
+             "fine        = original already meets the rules and could not shrink; no copy made",
+             "failed      = left alone, see reason", ""]
+    rows = sorted((Path(k).name, v) for k, v in state.items() if Path(k).parent == folder)
+    for name, v in rows:
+        st = v.get("status")
+        if st == "done":
+            lines.append(f"converted  {human(v['orig'])} -> {human(v['new'])}  {name}")
+        elif st == "fine":
+            lines.append(f"fine       {human(v.get('orig', 0))}  {name}")
+        else:
+            lines.append(f"failed     {name}  ({v.get('reason', '')[:150]})")
+    tmp = d / ".README.tmp"
+    tmp.write_text("\n".join(lines) + "\n")
+    tmp.replace(d / "README-tinyclean.txt")
 
 
 # ------------------------------------------------------------------ main --
@@ -529,8 +573,10 @@ def quarantine_target(cfg, src):
 
 def describe(plan):
     lines = [f"  video : {plan['video_mode']} - {plan['video_why']}"]
-    a = plan["audio"]
-    lines.append(f"  audio : {a['why'] if a else 'none in source'}")
+    if not plan["audio"]:
+        lines.append("  audio : none in source")
+    for a in plan["audio"]:
+        lines.append(f"  audio : {a['why']}{' (default)' if a['default'] and len(plan['audio']) > 1 else ''}")
     kept = ", ".join(f"{lang_of(s) or 'untagged'}/{s.get('codec_name')}{' forced' if disp(s, 'forced') else ''}"
                      for s in plan["subs"]) or "-"
     lines.append(f"  subs  : keep {len(plan['subs'])} [{kept}], drop {plan['subs_dropped']} ({plan['subs_why']})")
@@ -543,9 +589,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="show the plan for each file, change nothing")
     ap.add_argument("--sample", type=int, metavar="N", help="encode a 60 s clip of the N largest files and report projected savings")
     ap.add_argument("--limit", type=int, default=0, help="stop after N files")
-    ap.add_argument("--delete-originals", action="store_true", help="delete originals instead of moving them to quarantine")
-    ap.add_argument("--originals", default="/data/_originals", help="quarantine folder (same share as the library)")
-    ap.add_argument("--library-base", default="/data", help="base used to mirror folders inside the quarantine")
+    ap.add_argument("--min-free-gb", type=int, default=DEFAULTS["min_free_gb"], help="stop when free space would drop below this")
     ap.add_argument("--state-dir", default=os.path.expanduser("~/.tinyclean"))
     ap.add_argument("--encoder", choices=["qsv", "x265"], default="qsv")
     ap.add_argument("--device", default="/dev/dri/renderD128")
@@ -564,8 +608,7 @@ def main():
         "encoder": args.encoder, "device": args.device,
         "quality_hd": args.quality_hd, "quality_sd": args.quality_sd,
         "x265_preset": args.x265_preset, "min_age_minutes": args.min_age,
-        "retry_failed": args.retry_failed, "originals": args.originals,
-        "library_base": args.library_base,
+        "retry_failed": args.retry_failed, "min_free_gb": args.min_free_gb,
     })
 
     state_dir = Path(args.state_dir)
@@ -638,8 +681,9 @@ def main():
             print()
             continue
 
-        out_path = path.with_name(f"{TEMP_PREFIX}{path.stem}{SUFFIX}.mkv")
-        final_path = path.with_name(f"{path.stem}{SUFFIX}.mkv")
+        clean = path.parent / CLEAN_DIR
+        out_path = clean / f"{TEMP_PREFIX}{path.stem}{SUFFIX}.mkv"
+        final_path = clean / f"{path.stem}{SUFFIX}.mkv"
 
         if args.sample:
             start = max(0.0, plan["duration"] / 2 - 30)
@@ -660,6 +704,15 @@ def main():
             print(f"  projected size: {ratio * 100:.0f}% of original (~{human(size * ratio)}, saves ~{human(size * (1 - ratio))})\n")
             sample_out.unlink(missing_ok=True)
             continue
+
+        free = shutil.disk_usage(path.parent).free
+        if free - size < cfg["min_free_gb"] * 1024 ** 3:
+            print(f"\n[stop] Only {human(free)} free on the NAS; a copy of this file could push it under "
+                  f"{cfg['min_free_gb']} GB. Clear some space (or lower --min-free-gb) and run again.")
+            break
+        created_clean = False
+        if plan["video_mode"] == "encode" or plan["rule_change"]:
+            created_clean = clean_dir_for(path)
 
         attempts = [plan["video_mode"]]
         if plan["video_mode"] == "encode":
@@ -703,41 +756,35 @@ def main():
         if STOP.now:
             break
 
+        mtime = int(path.stat().st_mtime)
         if result == "done":
             if final_path.exists():
-                print(f"  [skip] {final_path.name} already exists, leaving both alone\n")
+                print(f"  [skip] {final_path.name} already exists in Clean, leaving it\n")
                 out_path.unlink(missing_ok=True)
                 counts["failed"] += 1
                 continue
             os.replace(out_path, final_path)
-            if args.delete_originals:
-                path.unlink()
-                where = "deleted"
-            else:
-                target = quarantine_target(cfg, path)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(path, target)
-                where = f"moved to {target}"
             saved += size - new_size
             counts["done"] += 1
+            state[str(path)] = {"status": "done", "mtime": mtime, "orig": size, "new": new_size}
             print(f"  [done] {human(size)} -> {human(new_size)} "
-                  f"({(1 - new_size / size) * 100:.0f}% smaller). Original {where}.")
+                  f"({(1 - new_size / size) * 100:.0f}% smaller), saved as Clean/{final_path.name}")
         elif not notes or all("not worth it" in x for x in notes):
-            # Already meets every rule and cannot be shrunk: just mark it done.
-            if final_path.exists():
-                print(f"  [skip] {final_path.name} already exists\n")
-                counts["failed"] += 1
-                continue
-            os.replace(path, final_path)
-            result, new_size = "kept", size
+            result, new_size = "fine", size
             counts["kept"] += 1
-            print("  [kept] Already fine and could not be shrunk; renamed to -Clean.")
+            state[str(path)] = {"status": "fine", "mtime": mtime, "orig": size}
+            print("  [fine] Already meets the rules and could not be shrunk; no copy made.")
         else:
             result = "failed"
             counts["failed"] += 1
+            state[str(path)] = {"status": "failed", "mtime": mtime, "reason": "; ".join(notes)}
             print("  [FAILED] " + "; ".join(notes))
-            state[str(path)] = {"status": "failed", "mtime": int(path.stat().st_mtime), "reason": "; ".join(notes)}
-            save_state()
+        save_state()
+        write_readme(path.parent, state)
+        # Remove a Clean folder this file's run created but left with nothing in it.
+        if created_clean and result != "done" and clean.is_dir() and not any(p.suffix == ".mkv" and not p.name.startswith(".") for p in clean.iterdir()) \
+                and not any(v.get("status") == "done" for k, v in state.items() if Path(k).parent == path.parent):
+            shutil.rmtree(clean, ignore_errors=True)
 
         secs = time.time() - t0
         writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), str(path), result, size, new_size,
@@ -753,9 +800,10 @@ def main():
     if not args.dry_run and not args.sample:
         print("=" * 60)
         print(f"Converted {counts['done']}, already fine {counts['kept']}, failed/skipped {counts['failed']}.")
-        print(f"Space saved this run: {human(saved)}   Ledger: {ledger}")
-        if not args.delete_originals and counts["done"]:
-            print(f"Originals are in {cfg['originals']} until you delete them.")
+        print(f"Space the Clean copies would save once originals are removed: {human(saved)}")
+        print(f"Ledger: {ledger}")
+        if counts["done"]:
+            print("Originals are untouched. Check the Clean folders, then replace originals when you're happy.")
 
 
 if __name__ == "__main__":
