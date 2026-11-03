@@ -1228,6 +1228,9 @@ def main():
 
     status_root = library_root(args.paths[0])
     last_status = 0.0
+    if not args.dry_run and not args.sample:
+        write_status(status_root)          # right away, not only after the first file
+        last_status = time.time()
     counts = {"done": 0, "kept": 0, "failed": 0}
     saved = 0
     run_start = time.time()
