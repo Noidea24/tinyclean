@@ -12,7 +12,7 @@ reading and writing a Synology NAS over NFS.
 | HDR | HDR10 / HLG is re-encoded at 1080p and stays HDR, then checked. Dolby Vision with no HDR10 base layer is never touched. |
 | Audio | Keeps one English and one Japanese track, plus the original-language default track (e.g. Korean). Surround becomes a "night mode" stereo downmix: dialogue up, LFE out, loudness levelled, so there is no volume roller coaster. AAC 192k. |
 | Subtitles | Keeps English (forced, full, SDH; SRT, ASS, PGS). A lone untagged track is assumed English. Everything else is dropped. Only forced tracks are set to show by default. |
-| Container | Matroska (.mkv), named `<original>-Clean.mkv`. |
+| Container | Matroska (.mkv), named `<original>-noidea.mkv`, with a hidden `TINYCLEAN` tag so it is recognised even after Sonarr/Radarr rename it. |
 
 Every file gets a Clean copy, so a whole show ends up in one consistent format.
 Files that already meet the rules are remuxed (no quality loss).
@@ -48,6 +48,7 @@ tinyclean --sample 3 "/data/Movies/Some Film" # 60 s test clips, projected savin
 tinyclean --dry-run "/data/Episodes/Show"     # show the plan, change nothing
 tinyclean --replace "/data/Episodes/Show"     # swap originals for Clean copies (asks first)
 tinyclean --status "/data/Episodes"           # refresh and print the library status file
+tinyclean --rename-suffix "/data/Episodes"    # old -Clean files -> -noidea, tagged (asks first)
 ```
 
 Each library gets `_tinyclean-status.txt` at the top (refreshed every couple of
@@ -61,5 +62,6 @@ started, with sizes, so you can review and replace one folder at a time.
 | live | faster | 22 / 22 |
 
 Other options: `--batch N`, `--min-free-gb`, `--keep-hdr`, `--keep-sample`,
-`--limit`, `--retry-failed`, `--state-dir`. Ctrl+C stops cleanly; touching
+`--limit`, `--retry-failed`, `--state-dir`, `--check`, `--rename-suffix`.
+Tagging old files needs `mkvpropedit` (`apt install mkvtoolnix`). Ctrl+C stops cleanly; touching
 `~/.tinyclean/STOP` finishes the current file, then stops.

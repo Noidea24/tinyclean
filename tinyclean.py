@@ -31,8 +31,10 @@ Rules (in order of what matters most):
             happened to every file, plus .plexignore / .ignore so Plex and
             Jellyfin don't show the copies while you inspect them. A run stops
             before the NAS gets too full (--min-free-gb).
-  Naming    <folder>/Clean/<original name>-Clean.mkv. Files already ending in
-            -Clean, and files that already have a Clean copy, are skipped.
+  Naming    <folder>/Clean/<original name>-noidea.mkv, and every file carries a
+            hidden TINYCLEAN tag. Files ending in -noidea (or the old -Clean),
+            files with the tag (even if renamed later by Sonarr/Radarr), and
+            files that already have a Clean copy are skipped.
 
 Runs as a normal user that can write to the library. State, log and a CSV
 ledger live in --state-dir. Ctrl+C stops cleanly (temp file removed). Touch
@@ -56,7 +58,24 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-SUFFIX = "-Clean"
+VERSION = "6.9"
+SUFFIX = "-noidea"                  # added to every finished file's name
+OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
+ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
+TAG = "TINYCLEAN"                   # hidden tag inside every file tinyclean makes
+
+
+def done_suffix(stem):
+    """The tinyclean suffix a file name (without extension) ends in, or None."""
+    low = stem.lower()
+    return next((x for x in ALL_SUFFIXES if low.endswith(x.lower())), None)
+
+
+def strip_suffix(name):
+    """'<stem><suffix>.mkv' -> '<stem>'."""
+    stem = name[:-4] if name.lower().endswith(".mkv") else name
+    sfx = done_suffix(stem)
+    return stem[:-len(sfx)] if sfx else stem
 VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts",
               ".mpg", ".mpeg", ".flv", ".webm", ".divx", ".ogm"}
 TEMP_PREFIX = ".tinyclean."
@@ -210,6 +229,15 @@ def hdr_report(cfg, plan, out_path):
         else:
             text += ", brightness metadata missing (TVs use their defaults)"
     return True, text
+
+
+def tag_of(info):
+    tags = (info.get("format") or {}).get("tags") or {}
+    return next((v for k, v in tags.items() if k.upper() == TAG), "")
+
+
+def has_tag(info):
+    return bool(tag_of(info))
 
 
 def duration_of(info):
@@ -452,7 +480,8 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, dec
         cmd += ["-map", f"0:{s['index']}"]
     if plan["attachments"]:
         cmd += ["-map", "0:t?"]
-    cmd += ["-map_metadata", "0", "-map_chapters", "0", "-max_muxing_queue_size", "9999"]
+    cmd += ["-map_metadata", "0", "-map_chapters", "0", "-max_muxing_queue_size", "9999",
+            "-metadata", f"{TAG}=v{VERSION} {time.strftime('%Y-%m-%d')}"]
 
     # video
     if encode:
@@ -617,7 +646,7 @@ ALREADY_DONE = []
 def has_clean_copy(p):
     """True only if a Clean copy of original p actually exists on disk."""
     clean = p.parent / CLEAN_DIR
-    if (clean / f"{p.stem}{SUFFIX}.mkv").exists():
+    if any((clean / f"{p.stem}{x}.mkv").exists() for x in ALL_SUFFIXES):
         return True
     return any(orig == p.name and (clean / copy).exists() for copy, orig in read_map(clean).items())
 
@@ -640,7 +669,7 @@ def find_files(roots, cfg, state, include_done=False):
         for p in candidates:
             if p.name.startswith(TEMP_PREFIX) or p.suffix.lower() not in VIDEO_EXTS:
                 continue
-            if p.stem.lower().endswith(SUFFIX.lower()):
+            if done_suffix(p.stem):
                 continue
             if not include_done and has_clean_copy(p):
                 ALREADY_DONE.append(p)        # already has a Clean copy
@@ -677,8 +706,7 @@ def find_unfinished(roots):
 def original_for_temp(temp):
     """The original video a Clean/.tinyclean.<stem>-Clean.mkv temp file belongs to."""
     stem = temp.name[len(TEMP_PREFIX):]
-    if stem.endswith(SUFFIX + ".mkv"):
-        stem = stem[:-len(SUFFIX + ".mkv")]
+    stem = strip_suffix(stem)
     folder = temp.parent.parent if temp.parent.name == CLEAN_DIR else temp.parent
     for p in folder.iterdir() if folder.is_dir() else []:
         if p.is_file() and p.stem == stem and p.suffix.lower() in VIDEO_EXTS:
@@ -703,7 +731,7 @@ def write_readme(folder, state):
     if not d.is_dir():
         return
     lines = ["tinyclean results for this folder. Originals are untouched.",
-             "converted   = a smaller -Clean copy is in this folder",
+             f"converted   = a {SUFFIX} copy is in this folder",
              "fine        = original already meets the rules and could not shrink; no copy made",
              "failed      = left alone, see reason", ""]
     rows = sorted((Path(k).name, v) for k, v in state.items() if Path(k).parent == folder)
@@ -842,14 +870,14 @@ def pairs_in(folder):
     clean = folder / CLEAN_DIR
     mapping = read_map(clean)
     pairs = []
-    for c in sorted(clean.glob(f"*{SUFFIX}.mkv")):
+    for c in sorted(x for x in clean.glob("*.mkv") if done_suffix(x.stem)):
         if c.name.startswith("."):
             continue
         orig_name = mapping.get(c.name)
         if orig_name and (folder / orig_name).is_file():
             pairs.append((folder / orig_name, c))
             continue
-        stem = c.name[:-len(SUFFIX + ".mkv")]
+        stem = strip_suffix(c.name)
         for o in folder.iterdir():
             if o.is_file() and o.stem == stem and o.suffix.lower() in VIDEO_EXTS:
                 pairs.append((o, c))
@@ -928,7 +956,7 @@ def replace_originals(roots, cfg, yes, check_only=False):
                 f = folder / name
                 if f.suffix.lower() in VIDEO_EXTS and not name.startswith("."):
                     all_videos.append(f)
-                    if name not in have and not f.stem.lower().endswith(SUFFIX.lower()):
+                    if name not in have and not done_suffix(f.stem):
                         leftovers.append(f)
             dirnames[:] = [d for d in dirnames if d != CLEAN_DIR and not re.match(r"^[._@#]", d)]
     if not pairs:
@@ -977,7 +1005,7 @@ def replace_originals(roots, cfg, yes, check_only=False):
             print(f"  {k}:")
             for f in files:
                 print(f"    {f.relative_to(top) if str(f).startswith(top) else f}")
-        print("  Sort these out first (keep one copy of each), or you will end up with duplicate -Clean files.\n")
+        print(f"  Sort these out first (keep one copy of each), or you will end up with duplicate {SUFFIX} files.\n")
     if leftovers:
         print(f"Not touched - {len(leftovers)} video(s) in these folders have no Clean copy yet:")
         for f in leftovers[:20]:
@@ -1007,14 +1035,14 @@ def replace_originals(roots, cfg, yes, check_only=False):
     pairs = good
     done = 0
     for o, c in pairs:
-        name = c.name
+        name = strip_suffix(c.name) + SUFFIX + ".mkv"
         # Copies made before names were fixed: correct 2160p etc. from the real size.
         try:
             info = ffprobe(cfg["ffprobe"], c)
             v = next(s for s in info["streams"] if s.get("codec_type") == "video")
             w, h = int(v.get("width", 0)), int(v.get("height", 0))
             if w <= 1920 and h <= 1080:
-                name = scaled_name(c.name[:-len(SUFFIX + ".mkv")], w, h) + SUFFIX + ".mkv"
+                name = scaled_name(strip_suffix(c.name), w, h) + SUFFIX + ".mkv"
         except Exception:  # noqa: BLE001
             pass
         target = o.parent / name
@@ -1032,6 +1060,95 @@ def replace_originals(roots, cfg, yes, check_only=False):
                                       for p in clean.iterdir()):
             shutil.rmtree(clean, ignore_errors=True)
     print(f"\nReplaced {done} file(s). Rescan the library in Plex/Jellyfin, and Refresh in Sonarr/Radarr.")
+    for lib in {library_root(r) for r in roots}:
+        write_status(lib)
+
+
+def write_tag(cfg, path):
+    """Add the hidden TINYCLEAN tag to an existing MKV in place (needs mkvpropedit).
+    Keeps the file's other global tags. Returns '' on success, else the reason."""
+    tool = shutil.which("mkvpropedit")
+    if not tool:
+        return "mkvpropedit not installed"
+    try:
+        info = ffprobe(cfg["ffprobe"], path)
+    except Exception as exc:  # noqa: BLE001
+        return f"cannot read: {exc}"
+    if has_tag(info):
+        return ""
+    keep = {k: v for k, v in ((info.get("format") or {}).get("tags") or {}).items()
+            if k.upper() not in ("ENCODER", "CREATION_TIME", "DURATION", "TITLE")}
+    keep[TAG] = f"v{VERSION} {time.strftime('%Y-%m-%d')} (tagged later)"
+    from xml.sax.saxutils import escape
+    xml = ['<?xml version="1.0" encoding="UTF-8"?>', "<Tags><Tag><Targets/>"]
+    xml += [f"<Simple><Name>{escape(k)}</Name><String>{escape(str(v))}</String></Simple>" for k, v in keep.items()]
+    xml.append("</Tag></Tags>")
+    xf = path.parent / f".tinyclean-tags.{os.getpid()}.xml"
+    try:
+        xf.write_text("\n".join(xml))
+        r = subprocess.run([tool, str(path), "--tags", f"global:{xf}"], capture_output=True, text=True, timeout=300)
+        return "" if r.returncode in (0, 1) else (r.stdout + r.stderr).strip()[-200:]
+    finally:
+        xf.unlink(missing_ok=True)
+
+
+def rename_suffix(roots, cfg, yes):
+    """Rename finished files from an old suffix (-Clean) to the current one (-noidea),
+    tagging each one first. Lists everything and asks before changing anything."""
+    plan = []
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not re.match(r"^[._@#]", d)]
+            for name in filenames:
+                f = Path(dirpath) / name
+                if name.startswith(".") or f.suffix.lower() != ".mkv":
+                    continue
+                sfx = done_suffix(f.stem)
+                if sfx and sfx != SUFFIX:
+                    plan.append((f, f.with_name(f.stem[:-len(sfx)] + SUFFIX + ".mkv")))
+    if not plan:
+        print(f"Nothing to rename: no files ending in {', '.join(OLD_SUFFIXES)} here.")
+        return
+    tagging = bool(shutil.which("mkvpropedit"))
+    folders = sorted({str(a.parent) for a, _ in plan})
+    print(f"{len(plan)} file(s) in {len(folders)} folder(s) will be renamed to end in {SUFFIX}"
+          + (" and tagged as tinyclean output." if tagging else "."))
+    for fo in folders:
+        print(f"  {fo}")
+        for a, b in sorted((x for x in plan if str(x[0].parent) == fo), key=lambda x: x[0].name):
+            print(f"    {a.name}\n      -> {b.name}")
+    print()
+    if not tagging:
+        print("Note: mkvpropedit is not installed, so files are renamed but not tagged.\n"
+              "      (apt install mkvtoolnix, then run this again to tag them.)")
+    print("Nothing is deleted; files are only renamed (and tagged).")
+    if not yes:
+        if not sys.stdin.isatty():
+            sys.exit("Not running interactively; add --yes to confirm.")
+        if input("Type 'rename' to go ahead: ").strip() != "rename":
+            print("Nothing changed.")
+            return
+    done = tagged = 0
+    for i, (a, b) in enumerate(plan, 1):
+        if b.exists():
+            print(f"  [skip] {b.name} already exists")
+            continue
+        if tagging:
+            why = write_tag(cfg, a)
+            if why:
+                print(f"  [tag failed] {a.name}: {why}")
+            else:
+                tagged += 1
+        os.replace(a, b)
+        done += 1
+        if a.parent.name == CLEAN_DIR:
+            m = read_map(a.parent)
+            if a.name in m:
+                m[b.name] = m.pop(a.name)
+                write_map(a.parent, m)
+        if sys.stdout.isatty():
+            print(f"\r  {i}/{len(plan)}", end="", flush=True)
+    print(f"\nRenamed {done} file(s), tagged {tagged}. Rescan Plex/Jellyfin; Refresh in Sonarr/Radarr.")
     for lib in {library_root(r) for r in roots}:
         write_status(lib)
 
@@ -1088,7 +1205,7 @@ def scan_status(root):
                 if f.suffix.lower() not in VIDEO_EXTS or name.startswith("."):
                     continue
                 r["total"] += 1
-                if f.stem.lower().endswith(SUFFIX.lower()):
+                if done_suffix(f.stem):
                     r["replaced"] += 1
                 elif name in paired:
                     r["ready"] += 1
@@ -1144,7 +1261,7 @@ def status_text(root, rows):
         ("busy", "CONVERTING NOW", "  (converting)"),
         ("partial", "PARTLY DONE - some files converted or replaced, more to go", ""),
         ("attention", "NEEDS ATTENTION - only failed files left, see Clean/README-tinyclean.txt", ""),
-        ("replaced", "REPLACED - finished, every file is a -Clean file", ""),
+        ("replaced", f"REPLACED - finished, every file is a {SUFFIX} file", ""),
         ("new", "NOT STARTED", ""),
     ]
     for key, title, extra in sections:
@@ -1237,6 +1354,8 @@ def main():
     ap.add_argument("--replace", action="store_true",
                     help="swap originals for their Clean copies in the given folders (asks first)")
     ap.add_argument("--yes", action="store_true", help="with --replace: don't ask (for scripts)")
+    ap.add_argument("--rename-suffix", action="store_true",
+                    help=f"rename finished files from {'/'.join(OLD_SUFFIXES)} to {SUFFIX} and tag them (asks first)")
     ap.add_argument("--check", action="store_true",
                     help="compare originals with their Clean copies and report; changes nothing")
     ap.add_argument("--status", action="store_true",
@@ -1256,6 +1375,9 @@ def main():
         "hdr_encode": not args.keep_hdr,
     })
 
+    if args.rename_suffix:
+        rename_suffix(args.paths, cfg, args.yes)
+        return
     if args.replace or args.check:
         replace_originals(args.paths, cfg, args.yes, check_only=args.check)
         return
@@ -1396,6 +1518,12 @@ def main():
         t0 = time.time()
         try:
             info = ffprobe(cfg["ffprobe"], path)
+            if has_tag(info):
+                print(f"  [skip] already made by tinyclean ({tag_of(info)}), just renamed\n")
+                if not args.dry_run and not args.sample:
+                    state[str(path)] = {"status": "tagged", "mtime": int(path.stat().st_mtime)}
+                    save_state()
+                continue
             fcfg = file_cfg(path)
             plan = plan_file(path, info, fcfg)
         except Exception as exc:  # noqa: BLE001
