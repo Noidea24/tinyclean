@@ -3,8 +3,9 @@
 tinyclean - shrink and normalize a media library for TV playback.
 
 Rules (in order of what matters most):
-  Audio     One English track and one Japanese track, whichever exist
-            (commentary skipped); if neither exists, the file's main track.
+  Audio     One English track and one Japanese track, whichever exist, plus the
+            release's default track when it is another language (the original
+            language, e.g. Korean). Commentary is skipped.
             Each kept track follows the same rule. Stereo is kept as-is when it is already a
             TV-friendly codec (AAC, AC3, E-AC3, MP3). Surround is replaced by a
             "night mode" stereo downmix: centre (dialogue) weighted up, LFE
@@ -246,8 +247,16 @@ def pick_audio(streams):
         group = [s for s in audio if lang_of(s) in codes]
         if group:
             kept.append((best(main_tracks(group)), name))
-    if not kept:
-        kept.append((best(main_tracks(audio)), "main track (no English/Japanese)"))
+    # Also keep the release's default track (almost always the original language),
+    # e.g. Korean for Oldboy, unless that language is already kept or it is untagged.
+    mains = main_tracks(audio)
+    default = next((s for s in mains if disp(s, "default")), mains[0])
+    lang = lang_of(default)
+    covered = any(lang in codes for _, codes in KEEP_AUDIO)
+    if not covered and not (is_untagged(default) and kept):
+        same = [s for s in mains if lang_of(s) == lang]
+        label = f"original language ({lang})" if lang and not is_untagged(default) else "main track"
+        kept.insert(0, (best(same), label))
     return kept
 
 
