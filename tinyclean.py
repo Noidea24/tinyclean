@@ -857,37 +857,154 @@ def pairs_in(folder):
     return pairs
 
 
-def replace_originals(roots, cfg, yes):
-    """Swap each original for its verified Clean copy, after showing the list and asking."""
-    pairs = []
+EPISODE = re.compile(r"(?i)(?<![a-z0-9])s(\d{1,2})[ ._-]*e(\d{1,3})|(?<![0-9])(\d{1,2})x(\d{2,3})(?![0-9])")
+
+
+def episode_key(name):
+    m = EPISODE.search(name)
+    if not m:
+        return None
+    season, ep = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+    return f"S{int(season):02d}E{int(ep):02d}"
+
+
+def summarize(cfg, path):
+    """Short facts about a video for the replace check."""
+    info = ffprobe(cfg["ffprobe"], path)
+    st = info.get("streams", [])
+    v = next((x for x in st if x.get("codec_type") == "video" and not disp(x, "attached_pic")), {})
+    audio = [x for x in st if x.get("codec_type") == "audio"]
+    return {
+        "dur": duration_of(info),
+        "video": f"{v.get('codec_name', '?')} {v.get('width', '?')}x{v.get('height', '?')}",
+        "w": int(v.get("width", 0) or 0), "h": int(v.get("height", 0) or 0),
+        "hdr": v.get("color_transfer", "") in HDR_TRANSFERS,
+        "audio": ", ".join(f"{lang_of(a) or 'und'} {a.get('channels', '?')}ch" for a in audio) or "none",
+        "audio_n": len(audio), "max_ch": max([int(a.get("channels", 0) or 0) for a in audio] or [0]),
+        "subs": sum(1 for x in st if x.get("codec_type") == "subtitle"),
+    }
+
+
+def mmss(sec):
+    sec = int(round(sec))
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
+
+
+def check_pair(cfg, o, c):
+    """(problems, one-line facts) comparing an original with its Clean copy."""
+    try:
+        a, b = summarize(cfg, o), summarize(cfg, c)
+    except Exception as exc:  # noqa: BLE001
+        return [f"cannot read: {exc}"], ""
+    problems = []
+    if a["dur"] > 0 and abs(a["dur"] - b["dur"]) > max(2.0, a["dur"] * 0.005):
+        problems.append(f"length differs ({mmss(a['dur'])} vs {mmss(b['dur'])})")
+    if not b["w"]:
+        problems.append("no video in copy")
+    if b["w"] > 1920 or b["h"] > 1080:
+        problems.append("copy is bigger than 1080p (made by an old version?)")
+    if a["audio_n"] and not b["audio_n"]:
+        problems.append("copy has no audio")
+    if b["max_ch"] > 2:
+        problems.append("copy still has surround audio")
+    if a["hdr"] and not b["hdr"]:
+        problems.append("HDR lost")
+    facts = (f"{mmss(a['dur'])} = {mmss(b['dur'])}  |  {a['video']} -> {b['video']}{'  HDR' if b['hdr'] else ''}"
+             f"  |  audio {a['audio']} -> {b['audio']}  |  subs {a['subs']} -> {b['subs']}")
+    return problems, facts
+
+
+def replace_originals(roots, cfg, yes, check_only=False):
+    """Check every original against its Clean copy, show the list, ask, then swap.
+    Copies that fail a check are never used. check_only: report, change nothing."""
+    pairs, leftovers, all_videos = [], [], []
     for root in roots:
-        for dirpath, dirnames, _ in os.walk(root):
-            if CLEAN_DIR in dirnames and (Path(dirpath) / CLEAN_DIR).is_dir():
-                pairs += pairs_in(Path(dirpath))
+        for dirpath, dirnames, filenames in os.walk(root):
+            folder = Path(dirpath)
+            paired = pairs_in(folder) if (folder / CLEAN_DIR).is_dir() else []
+            pairs += paired
+            have = {o.name for o, _ in paired}
+            for name in filenames:
+                f = folder / name
+                if f.suffix.lower() in VIDEO_EXTS and not name.startswith("."):
+                    all_videos.append(f)
+                    if name not in have and not f.stem.lower().endswith(SUFFIX.lower()):
+                        leftovers.append(f)
             dirnames[:] = [d for d in dirnames if d != CLEAN_DIR and not re.match(r"^[._@#]", d)]
     if not pairs:
         print("No Clean copies with a matching original were found.")
+        if leftovers:
+            print(f"{len(leftovers)} video(s) in these folders have no Clean copy yet.")
         return
-    orig_total = sum(o.stat().st_size for o, _ in pairs)
-    clean_total = sum(c.stat().st_size for _, c in pairs)
+
+    print(f"Checking {len(pairs)} original(s) against their Clean copies (length, video, audio, subtitles)...")
+    results = {}
+    for i, (o, c) in enumerate(pairs, 1):
+        if sys.stdout.isatty():
+            print(f"\r  {i}/{len(pairs)}", end="", flush=True)
+        results[o] = check_pair(cfg, o, c)
+    if sys.stdout.isatty():
+        print("\r" + " " * 20 + "\r", end="")
+
+    # Same episode more than once in a show (two copies of S01E03 in different files or folders).
+    by_show = {}
+    for f in all_videos:
+        k = episode_key(f.name)
+        if k:
+            top = next((Path(r) for r in roots if str(f).startswith(str(r))), f.parent)
+            by_show.setdefault((str(top), k), []).append(f)
+    dupes = {k: v for k, v in by_show.items() if len(v) > 1}
+
+    good = [(o, c) for o, c in pairs if not results[o][0]]
+    bad = [(o, c) for o, c in pairs if results[o][0]]
     folders = sorted({str(o.parent) for o, _ in pairs})
-    print(f"{len(pairs)} original(s) in {len(folders)} folder(s) have a Clean copy.")
-    print("Every original below will be DELETED and replaced by the copy shown:\n")
+    print(f"{len(pairs)} original(s) in {len(folders)} folder(s) have a Clean copy: "
+          f"{len(good)} passed the checks, {len(bad)} did not.")
+    print("Each original that passed will be DELETED and replaced by the copy shown:\n")
     for f in folders:
         print(f"  {f}")
         for o, c in sorted((x for x in pairs if str(x[0].parent) == f), key=lambda x: x[0].name):
-            print(f"    DELETE {human(o.stat().st_size):>9}  {o.name}")
-            print(f"    KEEP   {human(c.stat().st_size):>9}  {c.name}")
+            problems, facts = results[o]
+            print(f"    {'SKIP  ' if problems else 'DELETE'} {human(o.stat().st_size):>9}  {o.name}")
+            print(f"    {'COPY  ' if problems else 'KEEP  '} {human(c.stat().st_size):>9}  {c.name}")
+            if problems:
+                print(f"      PROBLEM  {'; '.join(problems)}  -> this one is left alone")
+            print(f"      ok       {facts}" if not problems and facts else f"               {facts}" if facts else "")
     print()
-    print(f"Originals: {human(orig_total)}  ->  Clean copies: {human(clean_total)}  "
+    if dupes:
+        print(f"WARNING - the same episode appears more than once ({len(dupes)} episode(s)):")
+        for (top, k), files in sorted(dupes.items()):
+            print(f"  {k}:")
+            for f in files:
+                print(f"    {f.relative_to(top) if str(f).startswith(top) else f}")
+        print("  Sort these out first (keep one copy of each), or you will end up with duplicate -Clean files.\n")
+    if leftovers:
+        print(f"Not touched - {len(leftovers)} video(s) in these folders have no Clean copy yet:")
+        for f in leftovers[:20]:
+            print(f"    {f}")
+        if len(leftovers) > 20:
+            print(f"    ... and {len(leftovers) - 20} more")
+        print()
+    orig_total = sum(o.stat().st_size for o, _ in good)
+    clean_total = sum(c.stat().st_size for _, c in good)
+    print(f"Will replace {len(good)} file(s): originals {human(orig_total)} -> Clean copies {human(clean_total)} "
           f"(frees {human(orig_total - clean_total)})")
-    print("Each original will be DELETED and its Clean copy moved up into its place.")
+    if bad:
+        print(f"Will NOT touch {len(bad)} file(s) whose copy failed a check (see PROBLEM lines).")
+    if check_only:
+        print("Check only: nothing changed.")
+        return
+    if not good:
+        print("Nothing to replace.")
+        return
+    print("Deleted originals do not go to the Synology recycle bin.")
     if not yes:
         if not sys.stdin.isatty():
             sys.exit("Not running interactively; add --yes to confirm.")
         if input("Type 'replace' to go ahead: ").strip() != "replace":
             print("Nothing changed.")
             return
+    pairs = good
     done = 0
     for o, c in pairs:
         name = c.name
@@ -1120,6 +1237,8 @@ def main():
     ap.add_argument("--replace", action="store_true",
                     help="swap originals for their Clean copies in the given folders (asks first)")
     ap.add_argument("--yes", action="store_true", help="with --replace: don't ask (for scripts)")
+    ap.add_argument("--check", action="store_true",
+                    help="compare originals with their Clean copies and report; changes nothing")
     ap.add_argument("--status", action="store_true",
                     help=f"rewrite {STATUS_NAME} at the top of the library and print it")
     args = ap.parse_args()
@@ -1137,8 +1256,8 @@ def main():
         "hdr_encode": not args.keep_hdr,
     })
 
-    if args.replace:
-        replace_originals(args.paths, cfg, args.yes)
+    if args.replace or args.check:
+        replace_originals(args.paths, cfg, args.yes, check_only=args.check)
         return
     if args.status:
         for lib in dict.fromkeys(library_root(p) for p in args.paths):

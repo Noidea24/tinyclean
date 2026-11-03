@@ -24,8 +24,11 @@ Files that already meet the rules are remuxed (no quality loss).
 - Each copy is written as a hidden temp file, verified (duration, track counts,
   HDR), then renamed into place.
 - A free-space floor (default 500 GB) is checked before every file.
-- `--replace` swaps originals for their Clean copies only after listing every
-  file it will delete and keep, and only when you type `replace`.
+- `--replace` first checks every original against its Clean copy (length,
+  resolution, audio, subtitles, HDR) and shows the facts for each pair. Copies
+  that fail are left alone. It also warns about the same episode appearing
+  twice, and lists videos that have no Clean copy yet. Nothing is deleted until
+  you type `replace`. `--check` does the same report without changing anything.
 
 ## Install
 
