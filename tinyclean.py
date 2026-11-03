@@ -70,10 +70,19 @@ QSV_DECODERS = {"h264": "h264_qsv", "hevc": "hevc_qsv", "mpeg2video": "mpeg2_qsv
 QSV_PIX_FMTS = {"h264": {"yuv420p", "yuvj420p"}, "mpeg2video": {"yuv420p"}, "vc1": {"yuv420p"},
                 "hevc": {"yuv420p", "yuv420p10le"}, "vp9": {"yuv420p", "yuv420p10le"}}
 
+# Encoding profiles, chosen per show (asked once, then remembered) or with --profile.
+# quality: lower = better and bigger. preset: speed on the UHD 630 (faster ~12x, slow ~3x).
+# Live action gets more bits (22) for fast motion; tested on Fast Five: slow gained nothing over faster.
+PROFILES = {
+    "animated": {"preset": "faster", "quality_hd": 24, "quality_sd": 23},
+    "live":     {"preset": "faster", "quality_hd": 22, "quality_sd": 22},
+}
+DEFAULT_PROFILE = "live"     # used for unknown shows when nobody is there to answer
+# A "show" is the first folder under one of these, whichever folder you point tinyclean at.
+LIBRARY_ROOTS = ["/data/Episodes", "/data/Movies"]
+SEASON_DIR = re.compile(r"^(season|series|s)[ ._-]*\d+|^specials$|^extras$", re.I)
+
 DEFAULTS = {
-    "quality_hd": 24,        # Quick Sync ICQ / CQP value for > 576p (lower = better, bigger)
-    "quality_sd": 23,        # value for SD (DVD) material
-    "preset": "faster",      # Quick Sync speed preset (faster ~12x on the UHD 630; fast/slow ~3x)
     "max_height": 1080,
     "copy_hevc_bpp": 0.06,   # H.265/AV1 below this bits-per-pixel is left alone
     "min_saving": 0.05,      # a re-encode must save at least 5% to be kept
@@ -292,6 +301,7 @@ def plan_file(path, info, cfg):
         q = cfg["quality_sd"] if h <= 576 else cfg["quality_hd"]
         bits.append(f"q{q}")
         bits.append(cfg["preset"] if cfg["encoder"] == "qsv" else cfg["x265_preset"])
+        bits.append(f"{cfg.get('profile_name', '?')} profile")
         video_why = f"{v.get('codec_name')} {w}x{h} {bpp:.3f} bpp -> H.265 (" + ", ".join(bits) + ")"
 
     # ---- audio
@@ -590,6 +600,59 @@ def write_readme(folder, state):
 # ------------------------------------------------------------------ main --
 
 
+def show_key(path, roots):
+    """The show a file belongs to: the first folder under a library root (or under the
+    folder you pointed at). Season folders never count as a show of their own."""
+    for lib in LIBRARY_ROOTS:
+        try:
+            rel = path.relative_to(lib)
+        except ValueError:
+            continue
+        if len(rel.parts) > 1:
+            return str(Path(lib) / rel.parts[0])
+    for root in roots:
+        root = Path(root)
+        if root.is_file():
+            root = root.parent
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if len(rel.parts) > 1 and not SEASON_DIR.match(rel.parts[0]):
+            return str(root / rel.parts[0])
+        return str(root)
+    return str(path.parent)
+
+
+def ask_profiles(shows, profiles, interactive):
+    """Ask animated/live for each show not seen before. Returns True if anything was asked."""
+    unknown = sorted((s for s in shows if s not in profiles), key=lambda s: Path(s).name.lower())
+    if not unknown:
+        return False
+    if not interactive:
+        print(f"[profiles] {len(unknown)} show(s) have no profile yet; using '{DEFAULT_PROFILE}' for them this run.")
+        return False
+    print(f"{len(unknown)} show(s) need a profile. a = animated, l = live action, "
+          f"A / L = same for all remaining, Enter = {DEFAULT_PROFILE}.")
+    all_answer = None
+    for show in unknown:
+        if all_answer:
+            profiles[show] = all_answer
+            continue
+        while True:
+            ans = input(f"  {Path(show).name}: ").strip()
+            if ans in ("A", "L"):
+                all_answer = "animated" if ans == "A" else "live"
+                profiles[show] = all_answer
+                break
+            if ans.lower() in ("a", "l", ""):
+                profiles[show] = {"a": "animated", "l": "live", "": DEFAULT_PROFILE}[ans.lower()]
+                break
+            print("    please type a, l, A, L or press Enter")
+    print()
+    return True
+
+
 def variants(plan, cfg, mode):
     """Ways to try an encode, best first: GPU decode, then CPU decode; ICQ, then CQP."""
     if mode != "encode" or cfg["encoder"] != "qsv":
@@ -620,11 +683,12 @@ def main():
     ap.add_argument("--state-dir", default=os.path.expanduser("~/.tinyclean"))
     ap.add_argument("--encoder", choices=["qsv", "x265"], default="qsv")
     ap.add_argument("--device", default="/dev/dri/renderD128")
-    ap.add_argument("--quality-hd", type=int, default=DEFAULTS["quality_hd"])
-    ap.add_argument("--quality-sd", type=int, default=DEFAULTS["quality_sd"])
-    ap.add_argument("--preset", default=DEFAULTS["preset"],
+    ap.add_argument("--profile", choices=sorted(PROFILES), help="use this profile for every file (no questions)")
+    ap.add_argument("--quality-hd", type=int, help="override the profile's HD quality")
+    ap.add_argument("--quality-sd", type=int, help="override the profile's SD quality")
+    ap.add_argument("--preset",
                     choices=["veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"],
-                    help="Quick Sync speed preset")
+                    help="override the profile's Quick Sync speed preset")
     ap.add_argument("--x265-preset", default="medium")
     ap.add_argument("--min-age", type=int, default=DEFAULTS["min_age_minutes"], help="minutes since last change before a file is touched")
     ap.add_argument("--retry-failed", action="store_true")
@@ -636,7 +700,8 @@ def main():
         "ffmpeg": jf + "ffmpeg" if os.path.exists(jf + "ffmpeg") else "ffmpeg",
         "ffprobe": jf + "ffprobe" if os.path.exists(jf + "ffprobe") else "ffprobe",
         "encoder": args.encoder, "device": args.device,
-        "quality_hd": args.quality_hd, "quality_sd": args.quality_sd, "preset": args.preset,
+        "overrides": {k: v for k, v in (("quality_hd", args.quality_hd), ("quality_sd", args.quality_sd),
+                                         ("preset", args.preset)) if v is not None},
         "x265_preset": args.x265_preset, "min_age_minutes": args.min_age,
         "retry_failed": args.retry_failed, "min_free_gb": args.min_free_gb,
     })
@@ -680,6 +745,18 @@ def main():
     total_bytes = sum(s for _, s in files)
     print(f"{len(files)} file(s) to look at, {human(total_bytes)} in total.\n")
 
+    profiles_file = state_dir / "profiles.json"
+    profiles = json.loads(profiles_file.read_text()) if profiles_file.exists() else {}
+    shows = list(dict.fromkeys(show_key(p, args.paths) for p, _ in files))
+    if not args.profile and ask_profiles(shows, profiles, sys.stdin.isatty()):
+        tmp = profiles_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(profiles, indent=1, sort_keys=True))
+        tmp.replace(profiles_file)
+
+    def file_cfg(path):
+        name = args.profile or profiles.get(show_key(path, args.paths), DEFAULT_PROFILE)
+        return {**cfg, **PROFILES[name], **cfg["overrides"], "profile_name": name}
+
     counts = {"done": 0, "kept": 0, "failed": 0}
     saved = 0
     run_start = time.time()
@@ -697,7 +774,8 @@ def main():
         t0 = time.time()
         try:
             info = ffprobe(cfg["ffprobe"], path)
-            plan = plan_file(path, info, cfg)
+            fcfg = file_cfg(path)
+            plan = plan_file(path, info, fcfg)
         except Exception as exc:  # noqa: BLE001
             print(f"  [skip] cannot read: {exc}\n")
             counts["failed"] += 1
@@ -721,8 +799,8 @@ def main():
             sample_out = state_dir / "sample.mkv"
             mode = plan["video_mode"]
             rc, err = 1, []
-            for decode, rate in variants(plan, cfg, mode):
-                cmd = build_cmd(plan, cfg, sample_out, mode, rate_mode=rate, sample=(start, length), decode=decode)
+            for decode, rate in variants(plan, fcfg, mode):
+                cmd = build_cmd(plan, fcfg, sample_out, mode, rate_mode=rate, sample=(start, length), decode=decode)
                 rc, err = run_ffmpeg(cmd, length, f"  sample ({decode} decode)", progress)
                 if rc == 0 or STOP.now:
                     break
@@ -753,8 +831,8 @@ def main():
             if mode == "copy" and not plan["rule_change"]:
                 break                          # nothing to gain from a copy pass
             rc, err = 1, []
-            for decode, rate in variants(plan, cfg, mode):
-                cmd = build_cmd(plan, cfg, out_path, mode, rate_mode=rate, decode=decode)
+            for decode, rate in variants(plan, fcfg, mode):
+                cmd = build_cmd(plan, fcfg, out_path, mode, rate_mode=rate, decode=decode)
                 label = f"  {'encoding' if mode == 'encode' else 'remuxing'}"
                 if mode == "encode" and cfg["encoder"] == "qsv":
                     label += f" ({decode} decode)"
