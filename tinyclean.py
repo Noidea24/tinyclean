@@ -85,11 +85,12 @@ SEASON_DIR = re.compile(r"^(season|series|s)[ ._-]*\d+|^specials$|^extras$", re.
 
 DEFAULTS = {
     "max_height": 1080,
+    "max_width": 1920,
     "copy_hevc_bpp": 0.06,   # H.265/AV1 below this bits-per-pixel is left alone
     "min_saving": 0.05,      # a re-encode must save at least 5% to be kept
     "audio_bitrate": "192k",
     "min_age_minutes": 60,   # skip files touched in the last hour (imports in progress)
-    "min_free_gb": 100,      # stop before free space on the NAS drops below this
+    "min_free_gb": 500,      # never start a file that could push NAS free space below this
 }
 
 # ------------------------------------------------------------- small helpers --
@@ -291,7 +292,12 @@ def plan_file(path, info, cfg):
     bpp = vbr / (w * h * fps) if w and h and fps else 0.0
     hdr = v.get("color_transfer", "") in HDR_TRANSFERS
     ten_bit = "10" in v.get("pix_fmt", "") or "12" in v.get("pix_fmt", "")
-    needs_scale = h > cfg["max_height"]
+    needs_scale = h > cfg["max_height"] or w > cfg["max_width"]
+    if needs_scale:
+        f = min(cfg["max_width"] / w, cfg["max_height"] / h)
+        out_w, out_h = int(round(w * f / 2)) * 2, int(round(h * f / 2)) * 2
+    else:
+        out_w, out_h = w, h
     interlaced = v.get("field_order", "") in INTERLACED
     efficient = v.get("codec_name") in ("hevc", "av1") and bpp and bpp < cfg["copy_hevc_bpp"]
 
@@ -303,7 +309,7 @@ def plan_file(path, info, cfg):
         video_mode = "encode"
         bits = []
         if needs_scale:
-            bits.append(f"{h}p->{cfg['max_height']}p")
+            bits.append(f"{w}x{h}->{out_w}x{out_h}")
         if interlaced:
             bits.append("deinterlace")
         bits.append("10-bit" if ten_bit else "8-bit")
@@ -348,7 +354,7 @@ def plan_file(path, info, cfg):
                   and not needs_scale and not interlaced)
 
     return {
-        "gpu_decode": gpu_decode,
+        "gpu_decode": gpu_decode, "width": w, "out_w": out_w, "out_h": out_h,
         "path": path, "size": size, "duration": dur, "video": v, "video_mode": video_mode,
         "video_why": video_why, "hdr": hdr, "ten_bit": ten_bit, "needs_scale": needs_scale,
         "interlaced": interlaced, "height": h, "audio": audio, "subs": subs, "subs_why": s_why,
@@ -395,7 +401,7 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, dec
         if plan["interlaced"]:
             filters.append("bwdif=mode=send_frame")
         if plan["needs_scale"]:
-            filters.append(f"scale=-2:{cfg['max_height']}:flags=lanczos")
+            filters.append(f"scale={plan['out_w']}:{plan['out_h']}:flags=lanczos")
         q = cfg["quality_sd"] if plan["height"] <= 576 else cfg["quality_hd"]
         if cfg["encoder"] == "qsv":
             if not gpu:
@@ -546,7 +552,8 @@ def find_files(roots, cfg, state):
                 continue
             if p.stem.lower().endswith(SUFFIX.lower()):
                 continue
-            if (p.parent / CLEAN_DIR / f"{p.stem}{SUFFIX}.mkv").exists():
+            if (p.parent / CLEAN_DIR / f"{p.stem}{SUFFIX}.mkv").exists() or \
+                    p.name in read_map(p.parent / CLEAN_DIR).values():
                 ALREADY_DONE.append(p)        # already has a Clean copy
                 continue
             try:
@@ -679,6 +686,118 @@ def ask_profiles(shows, profiles, interactive):
     return True
 
 
+RES_TOKENS = re.compile(r"(?i)(?<![0-9a-z])(4320p|2160p|1440p)(?![0-9a-z])")
+RES_DIMS = re.compile(r"(?<!\d)(\d{4})x(\d{3,4})(?!\d)")
+UHD_TAGS = re.compile(r"(?i)[ ._-]*(?<![0-9a-z])(4k|uhd)(?![0-9a-z])")
+
+
+def scaled_name(stem, out_w, out_h):
+    """Fix resolution words in a file name after scaling down (2160p -> 1080p etc.)."""
+    new = RES_TOKENS.sub("1080p", stem)
+    new = RES_DIMS.sub(lambda m: f"{out_w}x{out_h}" if int(m.group(1)) > 1920 or int(m.group(2)) > 1080
+                       else m.group(0), new)
+    new = UHD_TAGS.sub("", new)
+    new = re.sub(r"\[\s*\]|\(\s*\)", "", new)
+    new = re.sub(r"\s{2,}", " ", new).strip(" ._-")
+    return new or stem
+
+
+MAP_NAME = ".tinyclean-map.json"   # in each Clean folder: clean file name -> original file name
+
+
+def read_map(clean):
+    try:
+        return json.loads((clean / MAP_NAME).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def write_map(clean, mapping):
+    tmp = clean / ".tinyclean-map.tmp"
+    tmp.write_text(json.dumps(mapping, indent=1, sort_keys=True))
+    tmp.replace(clean / MAP_NAME)
+
+
+def pairs_in(folder):
+    """(original, clean copy) pairs in one folder's Clean subfolder."""
+    clean = folder / CLEAN_DIR
+    mapping = read_map(clean)
+    pairs = []
+    for c in sorted(clean.glob(f"*{SUFFIX}.mkv")):
+        if c.name.startswith("."):
+            continue
+        orig_name = mapping.get(c.name)
+        if orig_name and (folder / orig_name).is_file():
+            pairs.append((folder / orig_name, c))
+            continue
+        stem = c.name[:-len(SUFFIX + ".mkv")]
+        for o in folder.iterdir():
+            if o.is_file() and o.stem == stem and o.suffix.lower() in VIDEO_EXTS:
+                pairs.append((o, c))
+                break
+    return pairs
+
+
+def replace_originals(roots, cfg, yes):
+    """Swap each original for its verified Clean copy, after showing the list and asking."""
+    pairs = []
+    for root in roots:
+        for dirpath, dirnames, _ in os.walk(root):
+            if CLEAN_DIR in dirnames and (Path(dirpath) / CLEAN_DIR).is_dir():
+                pairs += pairs_in(Path(dirpath))
+            dirnames[:] = [d for d in dirnames if d != CLEAN_DIR and not re.match(r"^[._@#]", d)]
+    if not pairs:
+        print("No Clean copies with a matching original were found.")
+        return
+    orig_total = sum(o.stat().st_size for o, _ in pairs)
+    clean_total = sum(c.stat().st_size for _, c in pairs)
+    folders = sorted({str(o.parent) for o, _ in pairs})
+    print(f"{len(pairs)} original(s) in {len(folders)} folder(s) have a Clean copy.")
+    print("Every original below will be DELETED and replaced by the copy shown:\n")
+    for f in folders:
+        print(f"  {f}")
+        for o, c in sorted((x for x in pairs if str(x[0].parent) == f), key=lambda x: x[0].name):
+            print(f"    DELETE {human(o.stat().st_size):>9}  {o.name}")
+            print(f"    KEEP   {human(c.stat().st_size):>9}  {c.name}")
+    print()
+    print(f"Originals: {human(orig_total)}  ->  Clean copies: {human(clean_total)}  "
+          f"(frees {human(orig_total - clean_total)})")
+    print("Each original will be DELETED and its Clean copy moved up into its place.")
+    if not yes:
+        if not sys.stdin.isatty():
+            sys.exit("Not running interactively; add --yes to confirm.")
+        if input("Type 'replace' to go ahead: ").strip() != "replace":
+            print("Nothing changed.")
+            return
+    done = 0
+    for o, c in pairs:
+        name = c.name
+        # Copies made before names were fixed: correct 2160p etc. from the real size.
+        try:
+            info = ffprobe(cfg["ffprobe"], c)
+            v = next(s for s in info["streams"] if s.get("codec_type") == "video")
+            w, h = int(v.get("width", 0)), int(v.get("height", 0))
+            if w <= 1920 and h <= 1080:
+                name = scaled_name(c.name[:-len(SUFFIX + ".mkv")], w, h) + SUFFIX + ".mkv"
+        except Exception:  # noqa: BLE001
+            pass
+        target = o.parent / name
+        if target.exists():
+            print(f"  [skip] {target.name} already exists next to the original")
+            continue
+        o.unlink()
+        os.replace(c, target)
+        done += 1
+        print(f"  replaced  {o.name}  ->  {target.name}")
+    for f in folders:
+        clean = Path(f) / CLEAN_DIR
+        # Remove the emptied Clean folder, but never while a conversion is in progress in it.
+        if clean.is_dir() and not any((p.suffix == ".mkv" and not p.name.startswith(".")) or p.name.startswith(TEMP_PREFIX)
+                                      for p in clean.iterdir()):
+            shutil.rmtree(clean, ignore_errors=True)
+    print(f"\nReplaced {done} file(s). Rescan the library in Plex/Jellyfin, and Refresh in Sonarr/Radarr.")
+
+
 WORKED = []   # the (rate, low_power) combination that last succeeded, tried first next time
 
 
@@ -726,6 +845,9 @@ def main():
     ap.add_argument("--x265-preset", default="medium")
     ap.add_argument("--min-age", type=int, default=DEFAULTS["min_age_minutes"], help="minutes since last change before a file is touched")
     ap.add_argument("--retry-failed", action="store_true")
+    ap.add_argument("--replace", action="store_true",
+                    help="swap originals for their Clean copies in the given folders (asks first)")
+    ap.add_argument("--yes", action="store_true", help="with --replace: don't ask (for scripts)")
     args = ap.parse_args()
 
     jf = "/usr/lib/jellyfin-ffmpeg/"
@@ -739,6 +861,10 @@ def main():
         "x265_preset": args.x265_preset, "min_age_minutes": args.min_age,
         "retry_failed": args.retry_failed, "min_free_gb": args.min_free_gb,
     })
+
+    if args.replace:
+        replace_originals(args.paths, cfg, args.yes)
+        return
 
     state_dir = Path(args.state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -788,6 +914,12 @@ def main():
                 in_progress = {o for o in map(original_for_temp, unfinished) if o}
                 print("Leaving them alone and skipping those videos this run.\n")
     files = find_files(args.paths, cfg, {} if (args.dry_run or args.sample) else state)
+    if not args.dry_run and not args.sample:
+        free = shutil.disk_usage(args.paths[0] if Path(args.paths[0]).is_dir() else Path(args.paths[0]).parent).free
+        print(f"NAS free space: {human(free)} (tinyclean keeps at least {cfg['min_free_gb']} GB free).")
+        if free < cfg["min_free_gb"] * 1024 ** 3:
+            sys.exit(f"Not starting: free space is already below {cfg['min_free_gb']} GB. "
+                     f"Replace some originals or clear space first.")
     if in_progress:
         files = [(p, sz) for p, sz in files if p not in in_progress]
     if args.sample:
@@ -925,6 +1057,8 @@ def main():
             break
 
         mtime = int(path.stat().st_mtime)
+        if result == "done" and mode == "encode" and plan["needs_scale"]:
+            final_path = clean / f"{scaled_name(path.stem, plan['out_w'], plan['out_h'])}{SUFFIX}.mkv"
         if result == "done":
             if final_path.exists():
                 print(f"  [skip] {final_path.name} already exists in Clean, leaving it\n")
@@ -932,6 +1066,9 @@ def main():
                 counts["failed"] += 1
                 continue
             os.replace(out_path, final_path)
+            mapping = read_map(clean)
+            mapping[final_path.name] = path.name
+            write_map(clean, mapping)
             saved += size - new_size
             counts["done"] += 1
             state[str(path)] = {"status": "done", "mtime": mtime, "orig": size, "new": new_size}
