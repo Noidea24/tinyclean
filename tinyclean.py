@@ -961,13 +961,8 @@ def replace_originals(roots, cfg, yes, check_only=False):
                     if name not in have and not done_suffix(f.stem):
                         leftovers.append(f)
             dirnames[:] = [d for d in dirnames if d != CLEAN_DIR and not re.match(r"^[._@#]", d)]
-    if not pairs:
-        print("No Clean copies with a matching original were found.")
-        if leftovers:
-            print(f"{len(leftovers)} video(s) in these folders have no Clean copy yet.")
-        return
-
-    print(f"Checking {len(pairs)} original(s) against their Clean copies (length, video, audio, subtitles)...")
+    if pairs:
+        print(f"Checking {len(pairs)} original(s) against their Clean copies (length, video, audio, subtitles)...")
     results = {}
     for i, (o, c) in enumerate(pairs, 1):
         if sys.stdout.isatty():
@@ -981,9 +976,32 @@ def replace_originals(roots, cfg, yes, check_only=False):
     for f in all_videos:
         k = episode_key(f.name)
         if k:
-            top = next((Path(r) for r in roots if str(f).startswith(str(r))), f.parent)
+            # Group per show: the first folder under the library (or under the folder given).
+            base = next((Path(r) for r in roots if str(f).startswith(str(r))), f.parent)
+            lib = library_root(base)
+            try:
+                top = lib / f.relative_to(lib).parts[0]
+            except (ValueError, IndexError):
+                top = base
             by_show.setdefault((str(top), k), []).append(f)
     dupes = {k: v for k, v in by_show.items() if len(v) > 1}
+
+    def print_dupes():
+        if not dupes:
+            return
+        print(f"WARNING - the same episode appears more than once ({len(dupes)} episode(s)):")
+        for (top, k), files_ in sorted(dupes.items()):
+            print(f"  {Path(top).name} {k}:")
+            for f in files_:
+                print(f"    {f.relative_to(top) if str(f).startswith(top) else f}")
+        print(f"  Sort these out first (keep one copy of each), or you will end up with duplicate {SUFFIX} files.\n")
+
+    if not pairs:
+        print_dupes()
+        print("No Clean copies with a matching original were found.")
+        if leftovers:
+            print(f"{len(leftovers)} video(s) in these folders have no Clean copy yet.")
+        return
 
     good = [(o, c) for o, c in pairs if not results[o][0]]
     bad = [(o, c) for o, c in pairs if results[o][0]]
@@ -1001,13 +1019,7 @@ def replace_originals(roots, cfg, yes, check_only=False):
                 print(f"      PROBLEM  {'; '.join(problems)}  -> this one is left alone")
             print(f"      ok       {facts}" if not problems and facts else f"               {facts}" if facts else "")
     print()
-    if dupes:
-        print(f"WARNING - the same episode appears more than once ({len(dupes)} episode(s)):")
-        for (top, k), files in sorted(dupes.items()):
-            print(f"  {k}:")
-            for f in files:
-                print(f"    {f.relative_to(top) if str(f).startswith(top) else f}")
-        print(f"  Sort these out first (keep one copy of each), or you will end up with duplicate {SUFFIX} files.\n")
+    print_dupes()
     if leftovers:
         print(f"Not touched - {len(leftovers)} video(s) in these folders have no Clean copy yet:")
         for f in leftovers[:20]:
