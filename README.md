@@ -44,7 +44,13 @@ tinyclean --profile live "/data/Movies"       # no questions
 tinyclean --sample 3 "/data/Movies/Some Film" # 60 s test clips, projected savings
 tinyclean --dry-run "/data/Episodes/Show"     # show the plan, change nothing
 tinyclean --replace "/data/Episodes/Show"     # swap originals for Clean copies (asks first)
+tinyclean --status "/data/Episodes"           # refresh and print the library status file
 ```
+
+Each library gets `_tinyclean-status.txt` at the top (refreshed every couple of
+minutes during a run, and after `--replace`). It groups every show or movie as
+ready to review, converting now, partly done, needs attention, replaced, or not
+started, with sizes, so you can review and replace one folder at a time.
 
 | Profile | Preset | Quality HD / SD |
 |---|---|---|

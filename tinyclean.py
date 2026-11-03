@@ -908,6 +908,143 @@ def replace_originals(roots, cfg, yes):
                                       for p in clean.iterdir()):
             shutil.rmtree(clean, ignore_errors=True)
     print(f"\nReplaced {done} file(s). Rescan the library in Plex/Jellyfin, and Refresh in Sonarr/Radarr.")
+    for lib in {library_root(r) for r in roots}:
+        write_status(lib)
+
+
+STATUS_NAME = "_tinyclean-status.txt"   # at the top of each library folder
+
+
+def library_root(path):
+    """The library folder a path belongs to (/data/Episodes, /data/Movies), else the path."""
+    path = Path(path)
+    for lib in LIBRARY_ROOTS:
+        try:
+            path.relative_to(lib)
+            return Path(lib)
+        except ValueError:
+            continue
+    return path if path.is_dir() else path.parent
+
+
+def scan_status(root):
+    """Look at the files on disk (shared by every worker) and sum up each show/movie."""
+    root = Path(root)
+    skip = re.compile(r"^[._@#]")
+    rows = {}
+    try:
+        top = sorted(root.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return rows
+    for item in top:
+        if skip.match(item.name):
+            continue
+        r = {"total": 0, "todo": 0, "ready": 0, "replaced": 0, "busy": 0, "failed": 0,
+             "orig_bytes": 0, "clean_bytes": 0}
+        walk = [(str(root), [], [item.name])] if item.is_file() else os.walk(item)
+        for dirpath, dirnames, filenames in walk:
+            dirnames[:] = [d for d in dirnames if not skip.match(d) and d != CLEAN_DIR]
+            folder = Path(dirpath)
+            clean = folder / CLEAN_DIR
+            have_clean = clean.is_dir()
+            paired = {o.name: c for o, c in pairs_in(folder)} if have_clean else {}
+            if have_clean:
+                for t in clean.iterdir():
+                    if t.name.startswith(TEMP_PREFIX):
+                        r["busy"] += 1
+                readme = clean / "README-tinyclean.txt"
+                if readme.is_file():
+                    try:
+                        r["failed"] += sum(1 for ln in readme.read_text().splitlines()
+                                           if re.match(r"failed\s+[^=\s]", ln))
+                    except OSError:
+                        pass
+            for name in filenames:
+                f = folder / name
+                if f.suffix.lower() not in VIDEO_EXTS or name.startswith("."):
+                    continue
+                r["total"] += 1
+                if f.stem.lower().endswith(SUFFIX.lower()):
+                    r["replaced"] += 1
+                elif name in paired:
+                    r["ready"] += 1
+                    try:
+                        r["orig_bytes"] += f.stat().st_size
+                        r["clean_bytes"] += paired[name].stat().st_size
+                    except OSError:
+                        pass
+                else:
+                    r["todo"] += 1
+        if r["total"]:
+            rows[item.name] = r
+    return rows
+
+
+def status_text(root, rows):
+    groups = {"busy": [], "review": [], "partial": [], "attention": [], "replaced": [], "new": []}
+    for name, r in rows.items():
+        if r["busy"]:
+            groups["busy"].append(name)
+        elif r["todo"] == 0 and r["ready"] == 0:
+            groups["replaced"].append(name)
+        elif r["todo"] == 0:
+            groups["review"].append(name)
+        elif r["failed"] and r["todo"] <= r["failed"]:
+            groups["attention"].append(name)
+        elif r["ready"] or r["replaced"]:
+            groups["partial"].append(name)
+        else:
+            groups["new"].append(name)
+    width = min(48, max([len(n) for n in rows] + [10]))
+    ready_o = sum(r["orig_bytes"] for r in rows.values())
+    ready_c = sum(r["clean_bytes"] for r in rows.values())
+
+    def line(n, extra=""):
+        r = rows[n]
+        done = r["ready"] + r["replaced"]
+        sizes = (f"  {human(r['orig_bytes']):>9} -> {human(r['clean_bytes']):>9}  frees {human(r['orig_bytes'] - r['clean_bytes'])}"
+                 if r["ready"] else "")
+        return f"  {n[:width]:<{width}}  {done:4d}/{r['total']:<4d}{sizes}{extra}"
+
+    out = [f"tinyclean status for {root}", f"Updated {time.strftime('%Y-%m-%d %H:%M')}"
+           " (refreshed during runs; tinyclean --status \"<folder>\" refreshes it by hand)", "",
+           f"{len(rows)} folders: {len(groups['review'])} ready to review, {len(groups['busy'])} converting now, "
+           f"{len(groups['partial'])} partly done, {len(groups['attention'])} need attention, "
+           f"{len(groups['replaced'])} replaced, {len(groups['new'])} not started.",
+           f"Clean copies waiting for review: {human(ready_o)} of originals -> {human(ready_c)} "
+           f"(replacing them would free {human(ready_o - ready_c)}).", "",
+           "Columns: done/total files, then originals -> Clean copies for files waiting for review.", ""]
+    sections = [
+        ("review", "READY TO REVIEW - every file has a Clean copy. Check a few, then:\n"
+                   f"  tinyclean --replace \"{root}/<folder name>\"", ""),
+        ("busy", "CONVERTING NOW", "  (converting)"),
+        ("partial", "PARTLY DONE - some files converted or replaced, more to go", ""),
+        ("attention", "NEEDS ATTENTION - only failed files left, see Clean/README-tinyclean.txt", ""),
+        ("replaced", "REPLACED - finished, every file is a -Clean file", ""),
+        ("new", "NOT STARTED", ""),
+    ]
+    for key, title, extra in sections:
+        if not groups[key]:
+            continue
+        out.append(title)
+        for n in groups[key]:
+            fail = f"  ({rows[n]['failed']} failed)" if rows[n]["failed"] else ""
+            out.append(line(n, extra + fail))
+        out.append("")
+    return "\n".join(out) + "\n"
+
+
+def write_status(root, echo=False):
+    root = Path(root)
+    try:
+        text = status_text(root, scan_status(root))
+        tmp = root / f".{STATUS_NAME}.{os.getpid()}.tmp"
+        tmp.write_text(text)
+        tmp.replace(root / STATUS_NAME)
+    except OSError as exc:
+        text = f"could not write status for {root}: {exc}"
+    if echo:
+        print(text)
 
 
 WORKED = []   # the (rate, low_power) combination that last succeeded, tried first next time
@@ -967,6 +1104,8 @@ def main():
     ap.add_argument("--replace", action="store_true",
                     help="swap originals for their Clean copies in the given folders (asks first)")
     ap.add_argument("--yes", action="store_true", help="with --replace: don't ask (for scripts)")
+    ap.add_argument("--status", action="store_true",
+                    help=f"rewrite {STATUS_NAME} at the top of the library and print it")
     args = ap.parse_args()
 
     jf = "/usr/lib/jellyfin-ffmpeg/"
@@ -984,6 +1123,10 @@ def main():
 
     if args.replace:
         replace_originals(args.paths, cfg, args.yes)
+        return
+    if args.status:
+        for lib in dict.fromkeys(library_root(p) for p in args.paths):
+            write_status(lib, echo=True)
         return
 
     state_dir = Path(args.state_dir)
@@ -1083,6 +1226,8 @@ def main():
         name = args.profile or profiles.get(show_key(path, args.paths), DEFAULT_PROFILE)
         return {**cfg, **PROFILES[name], **cfg["overrides"], "profile_name": name}
 
+    status_root = library_root(args.paths[0])
+    last_status = 0.0
     counts = {"done": 0, "kept": 0, "failed": 0}
     saved = 0
     run_start = time.time()
@@ -1252,6 +1397,9 @@ def main():
             print("  [FAILED] " + "; ".join(notes))
         save_state()
         write_readme(path.parent, state)
+        if time.time() - last_status > 120:
+            write_status(status_root)
+            last_status = time.time()
         # Remove a Clean folder this file's run created but left with nothing in it.
         if created_clean and result != "done" and clean.is_dir() and not any(p.suffix == ".mkv" and not p.name.startswith(".") for p in clean.iterdir()) \
                 and not any(v.get("status") == "done" for k, v in state.items() if Path(k).parent == path.parent):
@@ -1269,10 +1417,12 @@ def main():
 
     lf.close()
     if not args.dry_run and not args.sample:
+        write_status(status_root)
         print("=" * 60)
         print(f"Converted {counts['done']}, already fine {counts['kept']}, failed/skipped {counts['failed']}.")
         print(f"Space the Clean copies would save once originals are removed: {human(saved)}")
         print(f"Ledger: {ledger}")
+        print(f"Status of every show/movie: {status_root / STATUS_NAME}")
         if counts["done"]:
             print("Originals are untouched. Check the Clean folders, then replace originals when you're happy.")
 
