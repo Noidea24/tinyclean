@@ -332,9 +332,17 @@ def pick_audio(streams):
     # Also keep the release's default track (almost always the original language),
     # e.g. Korean for Oldboy, unless that language is already kept or it is untagged.
     mains = main_tracks(audio)
-    default = next((s for s in mains if disp(s, "default")), mains[0])
+    flagged = [s for s in mains if disp(s, "default")]
+    if len(flagged) > 1 and kept:
+        # Several tracks claim to be the default (e.g. Russian dub + English on a
+        # web release): the signal is useless, so don't add an extra language.
+        return kept
+    default = flagged[0] if flagged else mains[0]
     lang = lang_of(default)
     covered = any(lang in codes for _, codes in KEEP_AUDIO)
+    dub = re.search(r"(?i)\b(dub|dubbed|dubbing|mvo|dvo|avo|voice[- ]?over)\b", title_of(default))
+    if dub and kept:
+        return kept
     if not covered and not (is_untagged(default) and kept):
         same = [s for s in mains if lang_of(s) == lang]
         label = f"original language ({lang})" if lang and not is_untagged(default) else "main track"
@@ -425,6 +433,10 @@ def plan_file(path, info, cfg):
     # Default track: whichever kept track the source had as default, else the first.
     if audio:
         defaults = [i for i, a in enumerate(audio) if disp(a["stream"], "default")]
+        if len(defaults) > 1:
+            # More than one flagged default: prefer English, then the first.
+            eng = [i for i in defaults if lang_of(audio[i]["stream"]) in ENGLISH]
+            defaults = eng or defaults
         for i, a in enumerate(audio):
             a["default"] = i == (defaults[0] if defaults else 0)
 
