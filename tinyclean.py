@@ -59,7 +59,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "6.9"
+VERSION = "7.1"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -94,9 +94,12 @@ DV_TOKENS = re.compile(r"(?i)[ ._-]*(?<![0-9a-z])(dv|dovi|dolby[ ._-]?vision)(?!
 INTERLACED = {"tt", "bb", "tb", "bt"}
 # Codecs the UHD 630 can decode on the GPU, and the pixel formats it accepts.
 QSV_DECODERS = {"h264": "h264_qsv", "hevc": "hevc_qsv", "mpeg2video": "mpeg2_qsv",
-                "vc1": "vc1_qsv", "vp9": "vp9_qsv"}
+                "vc1": "vc1_qsv", "vp9": "vp9_qsv", "av1": "av1_qsv"}
+# AV1 decodes on newer iGPUs (N100 and later). On the UHD 630 the GPU attempt
+# fails quickly and tinyclean falls back to CPU decoding by itself.
 QSV_PIX_FMTS = {"h264": {"yuv420p", "yuvj420p"}, "mpeg2video": {"yuv420p"}, "vc1": {"yuv420p"},
-                "hevc": {"yuv420p", "yuv420p10le"}, "vp9": {"yuv420p", "yuv420p10le"}}
+                "hevc": {"yuv420p", "yuv420p10le"}, "vp9": {"yuv420p", "yuv420p10le"},
+                "av1": {"yuv420p", "yuv420p10le"}}
 
 # Encoding profiles, chosen per show (asked once, then remembered) or with --profile.
 # quality: lower = better and bigger. preset: speed on the UHD 630 (faster ~12x, slow ~3x).
