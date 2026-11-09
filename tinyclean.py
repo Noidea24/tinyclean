@@ -59,7 +59,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "7.1"
+VERSION = "7.2"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -121,6 +121,7 @@ DEFAULTS = {
     "audio_bitrate": "192k",
     "min_age_minutes": 60,   # skip files touched in the last hour (imports in progress)
     "min_free_gb": 500,      # never start a file that could push NAS free space below this
+    "min_free_ram_mb": 256,  # stop ffmpeg before the container runs out of memory and locks up
 }
 
 # ------------------------------------------------------------- small helpers --
@@ -581,18 +582,57 @@ class Stopper:
 STOP = Stopper()
 
 
+LOW_MEMORY = -99          # run_ffmpeg's return code when it stopped ffmpeg for memory
+MEMORY = {"floor_mb": DEFAULTS["min_free_ram_mb"]}
+
+
+def mem_available_mb():
+    """Memory the container can still use, in MB, or None where /proc/meminfo has no figure.
+
+    In an LXC container LXCFS reports the container's own limit here, with the page cache from
+    reading videos off the NAS counted as available, so this is what matters for a lock-up.
+    """
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def run_ffmpeg(cmd, total_seconds, label, progress, src_fps=None):
-    """Run ffmpeg, drawing a progress line. Returns (returncode, last stderr lines)."""
+    """Run ffmpeg, drawing a progress line. Returns (returncode, last stderr lines).
+
+    If the container's free memory stays under the floor for two checks in a row (2 s apart),
+    ffmpeg is stopped and the return code is LOW_MEMORY. A container that runs out of memory and
+    swap stops answering its own console until it is restarted, so a stopped file is the lesser harm.
+    """
     err = deque(maxlen=40)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
     STOP.procs.add(proc)
+    low = {}
 
     def pump_err():
         for line in proc.stderr:
             err.append(line.rstrip())
 
+    def watch_memory():
+        strikes = 0
+        while proc.poll() is None:
+            free = mem_available_mb()
+            strikes = strikes + 1 if free is not None and free < MEMORY["floor_mb"] else 0
+            if strikes >= 2:
+                low["free"] = free
+                proc.terminate()
+                return
+            time.sleep(2)
+
     t = threading.Thread(target=pump_err, daemon=True)
     t.start()
+    if MEMORY["floor_mb"] > 0 and mem_available_mb() is not None:
+        threading.Thread(target=watch_memory, daemon=True).start()
     state, started, last_draw = {}, time.time(), 0.0
     for line in proc.stdout:
         k, _, val = line.strip().partition("=")
@@ -622,6 +662,9 @@ def run_ffmpeg(cmd, total_seconds, label, progress, src_fps=None):
     proc.wait()
     t.join(timeout=2)
     STOP.procs.discard(proc)
+    if low:
+        err.append(f"stopped: memory ran low ({low['free']} MB free, floor {MEMORY['floor_mb']} MB)")
+        return LOW_MEMORY, list(err)
     return proc.returncode, list(err)
 
 
@@ -1361,6 +1404,9 @@ def main():
     ap.add_argument("--sample", type=int, metavar="N", help="encode a 60 s clip of the N largest files and report projected savings")
     ap.add_argument("--limit", type=int, default=0, help="stop after N files")
     ap.add_argument("--min-free-gb", type=int, default=DEFAULTS["min_free_gb"], help="stop when free space would drop below this")
+    ap.add_argument("--min-free-ram-mb", type=int, default=DEFAULTS["min_free_ram_mb"], metavar="MB",
+                    help="stop a file's ffmpeg when the container's free memory stays below this "
+                         "(default %(default)s, 0 = never), so the container cannot run out and lock up")
     ap.add_argument("--state-dir", default=os.path.expanduser("~/.tinyclean"))
     ap.add_argument("--encoder", choices=["qsv", "x265"], default="qsv")
     ap.add_argument("--device", default="/dev/dri/renderD128")
@@ -1403,8 +1449,10 @@ def main():
                                          ("preset", args.preset)) if v is not None},
         "x265_preset": args.x265_preset, "min_age_minutes": args.min_age,
         "retry_failed": args.retry_failed, "min_free_gb": args.min_free_gb,
+        "min_free_ram_mb": args.min_free_ram_mb,
         "hdr_encode": not args.keep_hdr,
     })
+    MEMORY["floor_mb"] = max(0, cfg["min_free_ram_mb"])
 
     if args.rename_suffix:
         rename_suffix(args.paths, cfg, args.yes)
@@ -1648,7 +1696,7 @@ def main():
                 cmd = build_cmd(plan, fcfg, sample_out, mode, rate_mode=rate, sample=(start, length),
                                 decode=decode, low_power=lp)
                 rc, err = run_ffmpeg(cmd, length, f"  sample ({decode} decode{', low-power' if lp else ''})", prog, plan.get("fps"))
-                if rc == 0 or STOP.now:
+                if rc == 0 or STOP.now or rc == LOW_MEMORY:
                     if rc == 0 and mode == "encode":
                         WORKED[:] = [(rate, lp)]
                     break
@@ -1688,6 +1736,9 @@ def main():
                 rc, err = run_ffmpeg(cmd, plan["duration"], label, prog, plan.get("fps"))
                 if tty and not multi:
                     print()
+                if rc == LOW_MEMORY:
+                    # Other attempts (CPU decode, a copy) need as much or more, so stop here.
+                    break
                 if rc == 0 or STOP.now:
                     if rc == 0 and mode == "encode" and cfg["encoder"] == "qsv":
                         WORKED[:] = [(rate, lp)]
@@ -1698,6 +1749,11 @@ def main():
             if STOP.now:
                 out_path.unlink(missing_ok=True)
                 return out
+            if rc == LOW_MEMORY:
+                notes.append(f"{err[-1]}; this file needs more memory than the container has, "
+                             f"convert it on a worker with more RAM")
+                out_path.unlink(missing_ok=True)
+                break
             if rc != 0:
                 notes.append(f"{mode} failed: {(err[-1] if err else 'exit ' + str(rc))[:200]}")
                 out_path.unlink(missing_ok=True)

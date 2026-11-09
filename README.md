@@ -24,6 +24,12 @@ Files that already meet the rules are remuxed (no quality loss).
 - Each copy is written as a hidden temp file, verified (duration, track counts,
   HDR), then renamed into place.
 - A free-space floor (default 500 GB) is checked before every file.
+- A memory floor (default 256 MB, `--min-free-ram-mb`) is watched while ffmpeg
+  runs. If the container's free memory stays under it, that file's ffmpeg is
+  stopped and the file is marked failed with the reason, instead of the
+  container running out of memory and swap and no longer answering its console.
+  No retry is tried for that file, since the other attempts need as much memory.
+  Convert it on a worker with more RAM, then run with `--retry-failed`.
 - `--replace` first checks every original against its Clean copy (length,
   resolution, audio, subtitles, HDR) and shows the facts for each pair. Copies
   that fail are left alone. It also warns about the same episode appearing
