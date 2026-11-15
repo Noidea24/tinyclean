@@ -59,7 +59,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "7.3"
+VERSION = "7.4"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -276,21 +276,29 @@ def video_seconds(info):
     return 0.0
 
 
-ZERO_TAIL = 1024 * 1024
+def video_continues(ffprobe_bin, path, after):
+    """True if ``path`` has video after ``after`` seconds (more than 2 s past it).
 
-
-def zero_tail(path):
-    """True if the file's last MB is all zeros: qBittorrent reserves the whole file before the
-    data arrives, so a download moved before it finished keeps a zero-filled ending."""
+    Some releases end their video before the length their header claims, often at the start of
+    the credits, so a copy that stops there has everything the original has. This reads only the
+    stretch just past ``after``. If ffprobe fails, the answer is True, so a mismatch still counts.
+    """
     try:
-        size = path.stat().st_size
-        if size < ZERO_TAIL * 4:
-            return False
-        with open(path, "rb") as f:
-            f.seek(size - ZERO_TAIL)
-            return not f.read(ZERO_TAIL).strip(b"\0")
-    except OSError:
-        return False
+        out = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time",
+             "-of", "csv=p=0", "-read_intervals", f"{max(0.0, after - 1):.3f}%+120", str(path)],
+            capture_output=True, text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if out.returncode != 0 and not out.stdout.strip():
+        return True
+    for line in out.stdout.split():
+        try:
+            if float(line.strip(",")) > after + 2:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def duration_of(info):
@@ -737,7 +745,11 @@ def verify(cfg, plan, out_path, sample_len=None):
         # Compare the video tracks: a dropped commentary can make the header longer than the film.
         src, out = plan["video_seconds"], video_seconds(info)
     if src > 0 and abs(out - src) > max(2.0, src * 0.005):
-        return False, f"duration mismatch: source {src:.1f}s, output {out:.1f}s"
+        if sample_len or out > src or video_continues(cfg["ffprobe"], plan["path"], out):
+            return False, f"duration mismatch: source {src:.1f}s, output {out:.1f}s"
+        # The original itself has no video past this point, so the copy holds all of it.
+        return True, (f"the original's video ends at {mmss(out)} though its header says {mmss(src)}; "
+                      f"the copy has all of it")
     if out_path.stat().st_size < 1024 * 1024 and src > 60:
         return False, "output suspiciously small"
     if plan["hdr"]:
@@ -1036,7 +1048,8 @@ def check_pair(cfg, o, c):
     except Exception as exc:  # noqa: BLE001
         return [f"cannot read: {exc}"], ""
     problems = []
-    if a["dur"] > 0 and abs(a["dur"] - b["dur"]) > max(2.0, a["dur"] * 0.005):
+    if a["dur"] > 0 and abs(a["dur"] - b["dur"]) > max(2.0, a["dur"] * 0.005) and \
+            (b["dur"] > a["dur"] or video_continues(cfg["ffprobe"], o, b["dur"])):
         problems.append(f"length differs ({mmss(a['dur'])} vs {mmss(b['dur'])})")
     if not b["w"]:
         problems.append("no video in copy")
@@ -1717,16 +1730,6 @@ def main():
                         state[str(path)] = {"status": "tagged", "mtime": int(path.stat().st_mtime)}
                         save_state()
                 return out
-            if zero_tail(path):
-                say("  [skip] incomplete download: the last MB of the file is all zeros. "
-                    "Download it again; tinyclean picks the new copy up by itself.\n")
-                with lock:
-                    counts["failed"] += 1
-                    if not args.dry_run and not args.sample:
-                        state[str(path)] = {"status": "failed", "mtime": int(path.stat().st_mtime),
-                                            "reason": "incomplete download (the file ends in zeros)"}
-                        save_state()
-                return out
             fcfg = file_cfg(path)
             plan = plan_file(path, info, fcfg)
         except Exception as exc:  # noqa: BLE001
@@ -1820,6 +1823,9 @@ def main():
                 out_path.unlink(missing_ok=True)
                 continue
             ok, why = verify(cfg, plan, out_path)
+            if ok and why != "ok":
+                say(f"  note  : {why}")
+                notes.append(why)
             if not ok:
                 notes.append(f"{mode} check failed: {why}")
                 out_path.unlink(missing_ok=True)
