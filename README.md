@@ -24,6 +24,11 @@ Files that already meet the rules are remuxed (no quality loss).
 - Each copy is written as a hidden temp file, verified (duration, track counts,
   HDR), then renamed into place.
 - A free-space floor (default 500 GB) is checked before every file.
+- A file whose last MB is all zeros is skipped as an incomplete download
+  (qBittorrent reserves the whole file before the data arrives). Download it
+  again and the next run picks the new copy up.
+- Lengths are compared on the video track, so a commentary or subtitle track
+  that runs past the film and gets dropped does not fail the check.
 - A memory floor (default 256 MB, `--min-free-ram-mb`) is watched while ffmpeg
   runs. If the container's free memory stays under it, that file's ffmpeg is
   stopped and the file is marked failed with the reason, instead of the

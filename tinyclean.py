@@ -59,7 +59,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "7.2"
+VERSION = "7.3"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -243,6 +243,54 @@ def tag_of(info):
 
 def has_tag(info):
     return bool(tag_of(info))
+
+
+def stream_seconds(stream):
+    """A stream's own length in seconds, from ffprobe or Matroska's DURATION tag, or 0 if unknown."""
+    try:
+        value = float(stream.get("duration", 0) or 0)
+    except ValueError:
+        value = 0.0
+    if value > 0:
+        return value
+    tags = stream.get("tags") or {}
+    for key, text in tags.items():
+        if key.upper().startswith("DURATION"):
+            try:
+                h, m, sec = str(text).split(":")
+                return int(h) * 3600 + int(m) * 60 + float(sec)
+            except ValueError:
+                continue
+    return 0.0
+
+
+def video_seconds(info):
+    """How long the main video track runs, or 0 if the file does not say.
+
+    The file's header length can come from a commentary or subtitle track that runs past the
+    film; tinyclean drops such tracks, so lengths are compared on the video, which it always keeps.
+    """
+    for s in info.get("streams", []):
+        if s.get("codec_type") == "video" and not disp(s, "attached_pic"):
+            return stream_seconds(s)
+    return 0.0
+
+
+ZERO_TAIL = 1024 * 1024
+
+
+def zero_tail(path):
+    """True if the file's last MB is all zeros: qBittorrent reserves the whole file before the
+    data arrives, so a download moved before it finished keeps a zero-filled ending."""
+    try:
+        size = path.stat().st_size
+        if size < ZERO_TAIL * 4:
+            return False
+        with open(path, "rb") as f:
+            f.seek(size - ZERO_TAIL)
+            return not f.read(ZERO_TAIL).strip(b"\0")
+    except OSError:
+        return False
 
 
 def duration_of(info):
@@ -459,7 +507,8 @@ def plan_file(path, info, cfg):
 
     return {
         "gpu_decode": gpu_decode, "fps": fps, "width": w, "out_w": out_w, "out_h": out_h,
-        "path": path, "size": size, "duration": dur, "video": v, "video_mode": video_mode,
+        "path": path, "size": size, "duration": dur, "video_seconds": video_seconds(info),
+        "video": v, "video_mode": video_mode,
         "video_why": video_why, "hdr": hdr, "dovi": dovi, "ten_bit": ten_bit, "needs_scale": needs_scale,
         "interlaced": interlaced, "height": h, "audio": audio, "subs": subs, "subs_why": s_why,
         "subs_dropped": len(all_subs) - len(subs), "attachments": attachments,
@@ -683,8 +732,10 @@ def verify(cfg, plan, out_path, sample_len=None):
     got_subs = sum(1 for s in streams if s.get("codec_type") == "subtitle")
     if got_subs != len(plan["subs"]):
         return False, f"expected {len(plan['subs'])} subtitle tracks, got {got_subs}"
-    src = sample_len or plan["duration"]
-    out = duration_of(info)
+    src, out = sample_len or plan["duration"], duration_of(info)
+    if not sample_len and plan.get("video_seconds") and video_seconds(info):
+        # Compare the video tracks: a dropped commentary can make the header longer than the film.
+        src, out = plan["video_seconds"], video_seconds(info)
     if src > 0 and abs(out - src) > max(2.0, src * 0.005):
         return False, f"duration mismatch: source {src:.1f}s, output {out:.1f}s"
     if out_path.stat().st_size < 1024 * 1024 and src > 60:
@@ -963,7 +1014,7 @@ def summarize(cfg, path):
     v = next((x for x in st if x.get("codec_type") == "video" and not disp(x, "attached_pic")), {})
     audio = [x for x in st if x.get("codec_type") == "audio"]
     return {
-        "dur": duration_of(info),
+        "dur": video_seconds(info) or duration_of(info),
         "video": f"{v.get('codec_name', '?')} {v.get('width', '?')}x{v.get('height', '?')}",
         "w": int(v.get("width", 0) or 0), "h": int(v.get("height", 0) or 0),
         "hdr": v.get("color_transfer", "") in HDR_TRANSFERS,
@@ -1664,6 +1715,16 @@ def main():
                 if not args.dry_run and not args.sample:
                     with lock:
                         state[str(path)] = {"status": "tagged", "mtime": int(path.stat().st_mtime)}
+                        save_state()
+                return out
+            if zero_tail(path):
+                say("  [skip] incomplete download: the last MB of the file is all zeros. "
+                    "Download it again; tinyclean picks the new copy up by itself.\n")
+                with lock:
+                    counts["failed"] += 1
+                    if not args.dry_run and not args.sample:
+                        state[str(path)] = {"status": "failed", "mtime": int(path.stat().st_mtime),
+                                            "reason": "incomplete download (the file ends in zeros)"}
                         save_state()
                 return out
             fcfg = file_cfg(path)
