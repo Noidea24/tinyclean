@@ -29,6 +29,8 @@ Files that already meet the rules are remuxed (no quality loss).
   is still shorter, the original is checked just past where the copy ends: if
   it has no video there either (some releases stop at the credits although
   their header says otherwise), the copy holds all of it and passes, with a note.
+  A copy longer than the header passes the same way when the original really
+  runs past its header, as old AVI files often do.
 - A memory floor (default 256 MB, `--min-free-ram-mb`) is watched while ffmpeg
   runs. If the container's free memory stays under it, that file's ffmpeg is
   stopped and the file is marked failed with the reason, instead of the
@@ -77,3 +79,13 @@ Other options: `--jobs N`, `--batch N`, `--min-free-gb`, `--keep-hdr`, `--keep-s
 `--limit`, `--retry-failed`, `--state-dir`, `--check`, `--rename-suffix`.
 Tagging old files needs `mkvpropedit` (`apt install mkvtoolnix`). Ctrl+C stops cleanly; touching
 `~/.tinyclean/STOP` finishes the current file, then stops.
+
+## Updating
+
+On each worker, as root:
+
+```
+t=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/Noidea24/tinyclean/main/tinyclean.py -o "$t" && install -m 755 "$t" /usr/local/bin/tinyclean && rm -f "$t"
+```
+
+A fresh temporary file each time, so a copy another user left in /tmp cannot block the download.

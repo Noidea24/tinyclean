@@ -59,7 +59,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "7.4"
+VERSION = "7.5"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -299,6 +299,17 @@ def video_continues(ffprobe_bin, path, after):
         except ValueError:
             continue
     return False
+
+
+def holds_all(ffprobe_bin, original, header, copy):
+    """True if a copy of ``copy`` seconds holds all of an original whose header says ``header``.
+
+    The original must have no video past the copy's end. A copy longer than the header also needs
+    the original to really run past its header, as old AVI files often do.
+    """
+    if video_continues(ffprobe_bin, original, copy):
+        return False
+    return copy <= header or video_continues(ffprobe_bin, original, header)
 
 
 def duration_of(info):
@@ -745,11 +756,13 @@ def verify(cfg, plan, out_path, sample_len=None):
         # Compare the video tracks: a dropped commentary can make the header longer than the film.
         src, out = plan["video_seconds"], video_seconds(info)
     if src > 0 and abs(out - src) > max(2.0, src * 0.005):
-        if sample_len or out > src or video_continues(cfg["ffprobe"], plan["path"], out):
+        if sample_len or not holds_all(cfg["ffprobe"], plan["path"], src, out):
             return False, f"duration mismatch: source {src:.1f}s, output {out:.1f}s"
-        # The original itself has no video past this point, so the copy holds all of it.
-        return True, (f"the original's video ends at {mmss(out)} though its header says {mmss(src)}; "
-                      f"the copy has all of it")
+        if out < src:
+            return True, (f"the original's video ends at {mmss(out)} though its header says {mmss(src)}; "
+                          f"the copy has all of it")
+        return True, (f"the original runs to {mmss(out)} though its header says {mmss(src)} "
+                      f"(common in old AVI files); the copy has all of it")
     if out_path.stat().st_size < 1024 * 1024 and src > 60:
         return False, "output suspiciously small"
     if plan["hdr"]:
@@ -1049,7 +1062,7 @@ def check_pair(cfg, o, c):
         return [f"cannot read: {exc}"], ""
     problems = []
     if a["dur"] > 0 and abs(a["dur"] - b["dur"]) > max(2.0, a["dur"] * 0.005) and \
-            (b["dur"] > a["dur"] or video_continues(cfg["ffprobe"], o, b["dur"])):
+            not holds_all(cfg["ffprobe"], o, a["dur"], b["dur"]):
         problems.append(f"length differs ({mmss(a['dur'])} vs {mmss(b['dur'])})")
     if not b["w"]:
         problems.append("no video in copy")
