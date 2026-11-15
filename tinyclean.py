@@ -59,7 +59,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "7.6"
+VERSION = "7.7"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1229,12 +1229,16 @@ def write_tag(cfg, path):
 
 
 def rename_suffix(roots, cfg, yes):
-    """Rename finished files from an old suffix (-Clean) to the current one (-noidea),
-    tagging each one first. Lists everything and asks before changing anything."""
-    plan = []
+    """Give every finished file the current suffix (-noidea). Files ending in an old suffix
+    (-Clean) are renamed and tagged. Files tinyclean made that lost the suffix, for example
+    when Sonarr or Radarr renamed them, are found by their hidden tag and get it back.
+    Lists everything and asks before changing anything."""
+    plan, retag = [], set()
+    looked = 0
     for root in roots:
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if not re.match(r"^[._@#]", d)]
+            dirnames[:] = [d for d in dirnames
+                           if not re.match(r"^[._@#]", d) and d.lower() != CLEAN_DIR.lower()]
             for name in filenames:
                 f = Path(dirpath) / name
                 if name.startswith(".") or f.suffix.lower() != ".mkv":
@@ -1242,8 +1246,22 @@ def rename_suffix(roots, cfg, yes):
                 sfx = done_suffix(f.stem)
                 if sfx and sfx != SUFFIX:
                     plan.append((f, f.with_name(f.stem[:-len(sfx)] + SUFFIX + ".mkv")))
+                    retag.add(f)
+                elif not sfx:
+                    looked += 1
+                    if sys.stdout.isatty():
+                        print(f"\r  checking files for tinyclean's tag: {looked}", end="", flush=True)
+                    try:
+                        made_here = has_tag(ffprobe(cfg["ffprobe"], f))
+                    except Exception:  # noqa: BLE001
+                        made_here = False
+                    if made_here:
+                        plan.append((f, f.with_name(f.stem + SUFFIX + ".mkv")))
+    if looked and sys.stdout.isatty():
+        print()
     if not plan:
-        print(f"Nothing to rename: no files ending in {', '.join(OLD_SUFFIXES)} here.")
+        print(f"Nothing to rename: no files ending in {', '.join(OLD_SUFFIXES)}, and no tinyclean "
+              f"files missing {SUFFIX}.")
         return
     tagging = bool(shutil.which("mkvpropedit"))
     folders = sorted({str(a.parent) for a, _ in plan})
@@ -1269,7 +1287,7 @@ def rename_suffix(roots, cfg, yes):
         if b.exists():
             print(f"  [skip] {b.name} already exists")
             continue
-        if tagging:
+        if tagging and a in retag:
             why = write_tag(cfg, a)
             if why:
                 print(f"  [tag failed] {a.name}: {why}")
@@ -1496,7 +1514,8 @@ def main():
                     help="swap originals for their Clean copies in the given folders (asks first)")
     ap.add_argument("--yes", action="store_true", help="with --replace: don't ask (for scripts)")
     ap.add_argument("--rename-suffix", action="store_true",
-                    help=f"rename finished files from {'/'.join(OLD_SUFFIXES)} to {SUFFIX} and tag them (asks first)")
+                    help=f"rename finished files from {'/'.join(OLD_SUFFIXES)} to {SUFFIX} and tag them, and give "
+                         f"{SUFFIX} back to tinyclean files that lost it, e.g. renamed by Sonarr/Radarr (asks first)")
     ap.add_argument("--check", action="store_true",
                     help="compare originals with their Clean copies and report; changes nothing")
     ap.add_argument("--status", action="store_true",

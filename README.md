@@ -90,3 +90,18 @@ t=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/Noidea24/tinyclean/m
 ```
 
 A fresh temporary file each time, so a copy another user left in /tmp cannot block the download.
+
+## With Sonarr and Radarr
+
+Leave `-noidea` out of Sonarr's and Radarr's naming formats. tinyclean skips
+any file ending in `-noidea`, so if they added it, new downloads would look
+finished and never be converted. The suffix is tinyclean's to give:
+
+- New downloads arrive with plain names; tinyclean converts them, and
+  `--replace` names the result `...-noidea.mkv`.
+- If Sonarr or Radarr renames finished files (a library import, or Rename
+  Files), they lose the suffix. Each one still carries tinyclean's hidden tag,
+  so it is never converted twice, and `tinyclean --rename-suffix <folder>`
+  finds them by that tag and gives `-noidea` back. Files without the tag are
+  left alone.
+- After either, Refresh in Sonarr/Radarr so they pick up the new names.
