@@ -59,7 +59,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "7.7"
+VERSION = "8.0"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -974,6 +974,9 @@ def scaled_name(stem, out_w, out_h):
 
 
 MAP_NAME = ".tinyclean-map.json"   # in each Clean folder: clean file name -> original file name
+# Every file tinyclean itself writes into a Clean folder (besides the copies): a folder holding
+# only these is empty and can go; anything else in it means someone put it there, so it stays.
+CLEAN_OWN_FILES = {MAP_NAME, ".tinyclean-map.tmp", "README-tinyclean.txt", ".plexignore", ".ignore"}
 
 
 def read_map(clean):
@@ -1064,6 +1067,24 @@ def check_pair(cfg, o, c):
     facts = (f"{mmss(a['dur'])} = {mmss(b['dur'])}  |  {a['video']} -> {b['video']}{'  HDR' if b['hdr'] else ''}"
              f"  |  audio {a['audio']} -> {b['audio']}  |  subs {a['subs']} -> {b['subs']}")
     return problems, facts
+
+
+def remove_empty_clean(clean):
+    """Remove a Clean folder that holds nothing but tinyclean's own map file.
+    Anything else in it (a video, a conversion in progress, a file someone put there) keeps it."""
+    if not clean.is_dir():
+        return False
+    own = CLEAN_OWN_FILES
+    entries = list(clean.iterdir())
+    if any(e.name not in own or not e.is_file() for e in entries):
+        return False
+    for e in entries:
+        e.unlink(missing_ok=True)
+    try:
+        clean.rmdir()
+    except OSError:
+        return False
+    return True
 
 
 def replace_originals(roots, cfg, yes, check_only=False):
@@ -1185,16 +1206,20 @@ def replace_originals(roots, cfg, yes, check_only=False):
         if target.exists():
             print(f"  [skip] {target.name} already exists next to the original")
             continue
-        o.unlink()
-        os.replace(c, target)
+        # Copy into place first, original deleted second: if either step fails, no video is lost.
+        try:
+            os.replace(c, target)
+        except OSError as exc:
+            print(f"  [skip] could not move {c.name} into place ({exc}); original kept")
+            continue
+        try:
+            o.unlink()
+        except OSError as exc:
+            print(f"  [note] {target.name} is in place, but {o.name} could not be deleted ({exc}); remove it by hand")
         done += 1
         print(f"  replaced  {o.name}  ->  {target.name}")
     for f in folders:
-        clean = Path(f) / CLEAN_DIR
-        # Remove the emptied Clean folder, but never while a conversion is in progress in it.
-        if clean.is_dir() and not any((p.suffix == ".mkv" and not p.name.startswith(".")) or p.name.startswith(TEMP_PREFIX)
-                                      for p in clean.iterdir()):
-            shutil.rmtree(clean, ignore_errors=True)
+        remove_empty_clean(Path(f) / CLEAN_DIR)
     print(f"\nReplaced {done} file(s). Rescan the library in Plex/Jellyfin, and Refresh in Sonarr/Radarr.")
     for lib in {library_root(r) for r in roots}:
         write_status(lib)
@@ -1901,10 +1926,9 @@ def main():
             save_state()
             write_readme(path.parent, state)
             # Remove a Clean folder this file's run created but left with nothing in it.
-            if created_clean and result != "done" and clean.is_dir() \
-                    and not any(p.suffix == ".mkv" for p in clean.iterdir()) \
+            if created_clean and result != "done" \
                     and not any(v.get("status") == "done" for k, v in state.items() if Path(k).parent == path.parent):
-                shutil.rmtree(clean, ignore_errors=True)
+                remove_empty_clean(clean)
             secs = time.time() - t0
             writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), str(path), result, size, new_size,
                              int(secs), "; ".join(notes)])

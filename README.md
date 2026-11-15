@@ -24,6 +24,10 @@ Files that already meet the rules are remuxed (no quality loss).
 - Each copy is written as a hidden temp file, verified (duration, track counts,
   HDR), then renamed into place.
 - A free-space floor (default 500 GB) is checked before every file.
+- Replacing moves the Clean copy into place first and deletes the original
+  second, so a failure partway (a NAS hiccup) never leaves a video missing.
+  An emptied Clean folder is removed only when nothing but tinyclean's own
+  files are left in it.
 - Lengths are compared on the video track, so a commentary or subtitle track
   that runs past the film and gets dropped does not fail the check. A copy
   that is still shorter always fails: if the original has no video past where
@@ -105,3 +109,12 @@ finished and never be converted. The suffix is tinyclean's to give:
   finds them by that tag and gives `-noidea` back. Files without the tag are
   left alone.
 - After either, Refresh in Sonarr/Radarr so they pick up the new names.
+
+## Tests
+
+`python3 -m pytest -q` runs the test suite: names and helpers, what is planned
+for each kind of file, the checks a copy must pass, the memory guard, and full
+runs of the command on a small generated library (convert, check, replace, a
+short copy refused, a damaged original, a failed move, `--rename-suffix`). The
+tests make their own small videos, so they need ffmpeg and ffprobe on PATH.
+GitHub Actions runs them on Python 3.11 and 3.12 for every push and tag.
