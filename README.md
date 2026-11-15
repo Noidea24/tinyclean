@@ -25,12 +25,13 @@ Files that already meet the rules are remuxed (no quality loss).
   HDR), then renamed into place.
 - A free-space floor (default 500 GB) is checked before every file.
 - Lengths are compared on the video track, so a commentary or subtitle track
-  that runs past the film and gets dropped does not fail the check. When a copy
-  is still shorter, the original is checked just past where the copy ends: if
-  it has no video there either (some releases stop at the credits although
-  their header says otherwise), the copy holds all of it and passes, with a note.
-  A copy longer than the header passes the same way when the original really
-  runs past its header, as old AVI files often do.
+  that runs past the film and gets dropped does not fail the check. A copy
+  that is still shorter always fails: if the original has no video past where
+  the copy stops, the reason says the original looks damaged or incomplete and
+  should be re-downloaded. The original is never replaced by a shorter copy.
+- An already-efficient HEVC video is copied as-is; if the copy is refused
+  ("Could not write header"), the video is re-encoded instead and kept even if
+  slightly bigger.
 - A memory floor (default 256 MB, `--min-free-ram-mb`) is watched while ffmpeg
   runs. If the container's free memory stays under it, that file's ffmpeg is
   stopped and the file is marked failed with the reason, instead of the

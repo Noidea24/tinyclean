@@ -59,7 +59,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "7.5"
+VERSION = "7.6"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -299,17 +299,6 @@ def video_continues(ffprobe_bin, path, after):
         except ValueError:
             continue
     return False
-
-
-def holds_all(ffprobe_bin, original, header, copy):
-    """True if a copy of ``copy`` seconds holds all of an original whose header says ``header``.
-
-    The original must have no video past the copy's end. A copy longer than the header also needs
-    the original to really run past its header, as old AVI files often do.
-    """
-    if video_continues(ffprobe_bin, original, copy):
-        return False
-    return copy <= header or video_continues(ffprobe_bin, original, header)
 
 
 def duration_of(info):
@@ -756,13 +745,12 @@ def verify(cfg, plan, out_path, sample_len=None):
         # Compare the video tracks: a dropped commentary can make the header longer than the film.
         src, out = plan["video_seconds"], video_seconds(info)
     if src > 0 and abs(out - src) > max(2.0, src * 0.005):
-        if sample_len or not holds_all(cfg["ffprobe"], plan["path"], src, out):
-            return False, f"duration mismatch: source {src:.1f}s, output {out:.1f}s"
-        if out < src:
-            return True, (f"the original's video ends at {mmss(out)} though its header says {mmss(src)}; "
-                          f"the copy has all of it")
-        return True, (f"the original runs to {mmss(out)} though its header says {mmss(src)} "
-                      f"(common in old AVI files); the copy has all of it")
+        if not sample_len and out < src and not video_continues(cfg["ffprobe"], plan["path"], out):
+            # A short copy is never accepted: the original may carry on after a gap of bad data,
+            # and replacing it would lose that. Say what was found so it can be re-downloaded.
+            return False, (f"the original looks damaged or incomplete: its video stops at {mmss(out)} "
+                           f"but should run to {mmss(src)}; re-download it")
+        return False, f"duration mismatch: source {src:.1f}s, output {out:.1f}s"
     if out_path.stat().st_size < 1024 * 1024 and src > 60:
         return False, "output suspiciously small"
     if plan["hdr"]:
@@ -1061,8 +1049,7 @@ def check_pair(cfg, o, c):
     except Exception as exc:  # noqa: BLE001
         return [f"cannot read: {exc}"], ""
     problems = []
-    if a["dur"] > 0 and abs(a["dur"] - b["dur"]) > max(2.0, a["dur"] * 0.005) and \
-            not holds_all(cfg["ffprobe"], o, a["dur"], b["dur"]):
+    if a["dur"] > 0 and abs(a["dur"] - b["dur"]) > max(2.0, a["dur"] * 0.005):
         problems.append(f"length differs ({mmss(a['dur'])} vs {mmss(b['dur'])})")
     if not b["w"]:
         problems.append("no video in copy")
@@ -1800,6 +1787,10 @@ def main():
         attempts = [plan["video_mode"]]
         if plan["video_mode"] == "encode":
             attempts.append("copy")            # fallback if the re-encode is too big
+        elif plan["video_why"].startswith("already efficient"):
+            # Some HEVC encodes carry setup data the Matroska muxer refuses to copy
+            # ("Could not write header"); a re-encode writes fresh setup data.
+            attempts.append("encode")
         result, notes, new_size, mode = None, [], 0, plan["video_mode"]
         for mode in attempts:
             # Every file gets a verified Clean copy, even one that already meets the
@@ -1844,7 +1835,10 @@ def main():
                 out_path.unlink(missing_ok=True)
                 continue
             new_size = out_path.stat().st_size
-            if mode == "copy" or new_size <= size * cfg["max_growth"]:
+            if mode == "copy" or new_size <= size * cfg["max_growth"] or plan["video_mode"] == "copy":
+                if mode == "encode" and plan["video_mode"] == "copy":
+                    say("  note  : the video could not be copied as-is, so it was re-encoded")
+                    notes.append("video could not be copied as-is, re-encoded")
                 result = "done"
                 if mode == "copy" and plan["video_mode"] == "encode":
                     say(f"  note  : re-encode came out too big, kept the original "
