@@ -130,6 +130,27 @@ Other options: `--jobs N`, `--batch N`, `--min-free-gb`, `--keep-hdr`, `--keep-s
 Tagging old files needs `mkvpropedit` (`apt install mkvtoolnix`). Ctrl+C stops cleanly; touching
 `~/.tinyclean/STOP` finishes the current file, then stops.
 
+## Dashboard
+
+One page for both transcoders, at `http://mediatool.lan`: each worker's state
+and live progress, Convert (folder picker, profile, files at once, first N
+folders, dry run), Review (check, then replace with a typed confirmation),
+Organize (mode, templates with presets and a preview, dry run with the plan as
+a table, apply, undo), Failures (latest attempt per file, with Retry), and
+History. It only passes requests on to the agents, and only the ones it
+knows; it never touches media itself.
+
+It runs as the image `ghcr.io/noidea24/mediatool-dashboard`, built when a
+release is published. Settings (Komodo Environment box, never in a file):
+
+| Setting | |
+|---|---|
+| `MEDIATOOL_PASSWORD_HASH` | `docker run --rm -it ghcr.io/noidea24/mediatool-dashboard python /app/server.py hash` |
+| `MEDIATOOL_AGENTS` | `transcoder2=http://10.10.10.54:8770=<token>,transcoder=http://<ip>:8770=<token>` |
+
+A worker that is switched off shows as "off", not as an error. LAN and
+Tailscale only.
+
 ## Organize (names and folders from Plex)
 
 Plex has already matched every file, so tinyclean can name files from Plex's

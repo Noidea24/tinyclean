@@ -28,7 +28,7 @@ jobs:
       - name: Install pytest
         run: python -m pip install pytest
       - name: Compile
-        run: python -m py_compile engine/tinyclean.py agent/agent.py
+        run: python -m py_compile engine/tinyclean.py agent/agent.py dashboard/server.py
       - name: Test
         run: python -m pytest -q
 

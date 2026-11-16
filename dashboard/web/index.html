@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mediatool</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="login" class="hide">
+  <form id="loginform" class="loginbox">
+    <h1>mediatool</h1>
+    <input type="password" name="password" placeholder="Password" autocomplete="current-password" autofocus>
+    <button type="submit">Log in</button>
+    <p id="loginmsg" class="muted"></p>
+  </form>
+</div>
+
+<div id="app" class="hide">
+  <header class="top">
+    <a class="brand" href="#/overview">mediatool</a>
+    <nav id="nav">
+      <a href="#/overview">Overview</a>
+      <a href="#/convert">Convert</a>
+      <a href="#/review">Review</a>
+      <a href="#/organize">Organize</a>
+      <a href="#/failures">Failures</a>
+      <a href="#/history">History</a>
+    </nav>
+    <button class="plain small" id="logout">Log out</button>
+  </header>
+  <main id="view"></main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

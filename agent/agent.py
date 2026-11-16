@@ -409,6 +409,38 @@ def list_saved(folder, pattern):
     return out
 
 
+VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".mpg", ".mpeg", ".flv",
+              ".webm", ".divx", ".ogm"}
+
+
+def browse(cfg, path):
+    """One folder's sub-folders and videos, inside the library folders only. No path: the library folders."""
+    if not path:
+        return {"path": None, "parent": None, "dirs": [{"name": str(r), "path": str(r)} for r in cfg["roots"]],
+                "files": []}
+    real = Path(os.path.realpath(path))
+    root = next((r for r in cfg["roots"] if real == r or r in real.parents), None)
+    if root is None:
+        raise BadRequest("outside the library folders")
+    if not real.is_dir():
+        raise BadRequest("not a folder")
+    dirs, files = [], []
+    with os.scandir(real) as it:
+        for e in it:
+            if e.name.startswith((".", "@", "#")):
+                continue
+            try:
+                if e.is_dir():
+                    dirs.append({"name": e.name, "path": str(real / e.name), "clean": e.name == "Clean"})
+                elif os.path.splitext(e.name)[1].lower() in VIDEO_EXTS:
+                    files.append({"name": e.name, "path": str(real / e.name), "size": e.stat().st_size})
+            except OSError:
+                continue
+    dirs.sort(key=lambda d: d["name"].lower())
+    files.sort(key=lambda f: f["name"].lower())
+    return {"path": str(real), "parent": None if real == root else str(real.parent), "dirs": dirs, "files": files}
+
+
 def ledger_rows(path, after=0):
     import csv
     try:
@@ -498,6 +530,13 @@ def make_handler(cfg, jobs, started):
                         return self.send(400, {"error": "bad name"})
                     f = cfg["engine_state"] / parts[1] / parts[2]
                     return self.send(200, f.read_bytes()) if f.is_file() else self.send(404, {"error": "not found"})
+                if parts == ["api", "browse"]:
+                    try:
+                        return self.send(200, browse(cfg, q.get("path")))
+                    except BadRequest as exc:
+                        return self.send(400, {"error": str(exc)})
+                    except OSError as exc:
+                        return self.send(500, {"error": f"could not read the folder: {exc.strerror}"})
                 if parts == ["api", "ledger"]:
                     return self.send(200, ledger_rows(cfg["engine_state"] / "ledger.csv", int(q.get("after", 0))))
             except ValueError:

@@ -258,3 +258,17 @@ def test_plans_and_undo_logs_are_listed(server, cfg):
     code, plan = call(f"{url}/api/plans/plan-20261115-220406.json")
     assert code == 200 and plan["mode"] == "rename"
     assert call(f"{url}/api/plans/..%2F..%2Fsecret.json")[0] in (400, 404)
+
+
+def test_browse_stays_inside_the_library(server, library):
+    url, _ = server()
+    _, top = call(f"{url}/api/browse")
+    _, at_root = call(f"{url}/api/browse?path={library}")
+    assert at_root["parent"] is None
+    assert top["dirs"] == [{"name": str(library.resolve()), "path": str(library.resolve())}]
+    _, movies = call(f"{url}/api/browse?path={library}/Movies")
+    assert [d["name"] for d in movies["dirs"]] == ["Film (2001)"] and movies["parent"] == str(library.resolve())
+    _, film = call(f"{url}/api/browse?path={library}/Movies/Film%20(2001)")
+    assert film["files"][0]["name"] == "Film.mkv" and film["parent"] == str((library / "Movies").resolve())
+    assert call(f"{url}/api/browse?path=/etc")[0] == 400
+    assert call(f"{url}/api/browse?path={library}/../..")[0] == 400
