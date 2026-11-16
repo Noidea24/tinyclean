@@ -35,6 +35,9 @@ Rules (in order of what matters most):
             hidden TINYCLEAN tag. Files ending in -noidea (or the old -Clean),
             files with the tag (even if renamed later by Sonarr/Radarr), and
             files that already have a Clean copy are skipped.
+  Organize  --organize names files (and optionally folders) from Plex's matches,
+            as a dry run that saves a plan; --apply-plan carries it out and
+            --undo puts it back. See the README.
 
 Runs as a normal user that can write to the library. State, log and a CSV
 ledger live in --state-dir. Ctrl+C stops cleanly (temp file removed). Touch
@@ -59,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.0"
+VERSION = "8.1"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1504,9 +1507,463 @@ def describe(plan):
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- organize --
+# Rename, restructure or rebuild the library in a standard layout, from Plex's matches.
+# Every run is a dry run that saves a plan; --apply-plan carries out exactly that plan,
+# and every applied run leaves an undo log.
+
+ORGANIZE_MODES = ("rename", "restructure", "newtree")
+TEMPLATES = {
+    "movie_folder": "{title} ({year}) {tmdb-{tmdb}}",
+    "movie_file": "{title} ({year})",
+    "show_folder": "{show} ({year}) {tvdb-{tvdb}}",
+    "season_folder": "Season {season}",
+    "episode_file": "{show} ({year}) - S{season}E{episode} - {episode_title}",
+}
+TEMPLATE_TOKENS = {"title", "year", "imdb", "tmdb", "tvdb", "show", "season", "episode",
+                   "episode_title", "resolution", "edition"}
+SIDECAR_EXTS = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".nfo"}
+PLAN_MAX_AGE_HOURS = 24
+ENV_FILE = "/etc/mediatool/mediatool.env"
+_EMPTY = "\x00"
+_TOKEN = re.compile(r"\{(\w+)(?::(\d))?\}")
+
+
+def template_problems(template):
+    """Tokens in ``template`` that tinyclean does not know, as a list of names."""
+    return [m.group(1) for m in _TOKEN.finditer(template) if m.group(1) not in TEMPLATE_TOKENS]
+
+
+def render(template, values):
+    """Fill a name template. A token without a value disappears with the brackets around it,
+    characters not allowed in names are replaced, and spacing and separators are tidied."""
+    def token(m):
+        name, width = m.group(1), m.group(2)
+        if name not in TEMPLATE_TOKENS:
+            return m.group(0)
+        value = values.get(name)
+        if value in (None, ""):
+            return _EMPTY
+        if name in ("season", "episode") and str(value).isdigit():
+            return str(int(value)).zfill(int(width) if width else 2)
+        return str(value)
+    out = _TOKEN.sub(token, template)
+    # A bracket group holding an empty token goes entirely: "({imdb})" or "{tmdb-{tmdb}}".
+    out = re.sub(r"[(\[{][^()\[\]{}" + _EMPTY + r"]*" + _EMPTY + r"[^()\[\]{}]*[)\]}]", "", out)
+    out = out.replace(_EMPTY, "")
+    out = out.replace(": ", " - ").replace(":", "-")
+    out = re.sub(r"[\\/]", "-", out)
+    out = re.sub(r'[*?"<>|]', "", out)
+    out = re.sub(r"\s+", " ", out)
+    out = re.sub(r"( - )+", " - ", out)
+    out = re.sub(r"^\s*-\s*|\s*-\s*$", "", out)
+    return out.strip(" .")
+
+
+def load_env(path):
+    """KEY=VALUE lines from a file only root and the media group can read. Missing file: {}."""
+    values = {}
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+class Plex:
+    """Reads Plex's library over its web API. Only reads; the token is sent as a header, never shown."""
+
+    def __init__(self, url, token, timeout=60):
+        self.url = url.rstrip("/")
+        self.token = token
+        self.timeout = timeout
+
+    def get(self, path, **params):
+        import urllib.parse
+        import urllib.request
+        query = urllib.parse.urlencode(params)
+        req = urllib.request.Request(f"{self.url}{path}" + (f"?{query}" if query else ""),
+                                     headers={"Accept": "application/json", "X-Plex-Token": self.token})
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            return json.load(r).get("MediaContainer", {})
+
+    def all(self, path, **params):
+        """Every item, fetched 500 at a time."""
+        items, start = [], 0
+        while True:
+            c = self.get(path, **params, **{"X-Plex-Container-Start": start, "X-Plex-Container-Size": 500})
+            batch = c.get("Metadata", [])
+            items += batch
+            start += len(batch)
+            if not batch or start >= int(c.get("totalSize", c.get("size", start))):
+                return items
+
+    def sections(self):
+        return [d for d in self.get("/library/sections").get("Directory", []) if d.get("type") in ("movie", "show")]
+
+
+def plex_ids(meta):
+    """{'imdb': 'tt..', 'tmdb': '..', 'tvdb': '..'} from an item's Guid list; {} when unmatched."""
+    ids = {}
+    for g in meta.get("Guid", []) or []:
+        source, _, value = str(g.get("id", "")).partition("://")
+        if source in ("imdb", "tmdb", "tvdb") and value:
+            ids[source] = value
+    return ids
+
+
+def resolution_label(media):
+    r = str(media.get("videoResolution", "")).lower()
+    return {"4k": "2160p", "sd": "SD"}.get(r, f"{r}p" if r.isdigit() else "")
+
+
+def path_mapper(pairs):
+    """Turn Plex's paths into this machine's, from 'plex=local' pairs, longest prefix first."""
+    pairs = sorted(pairs, key=lambda p: -len(p[0]))
+
+    def mapped(path):
+        for plex_prefix, local_prefix in pairs:
+            if path == plex_prefix or path.startswith(plex_prefix.rstrip("/") + "/"):
+                return local_prefix.rstrip("/") + path[len(plex_prefix.rstrip("/")):]
+        return path
+    return mapped
+
+
+def read_library(plex, mapped):
+    """Every video Plex knows, as entries: file, section root, kind, folder group and template values.
+    Also returns files Plex knows but that cannot be named cleanly, with the reason."""
+    entries, skipped = [], []
+    for section in plex.sections():
+        roots = [Path(mapped(loc["path"])) for loc in section.get("Location", [])]
+        key = section["key"]
+
+        def root_of(f):
+            return next((r for r in roots if f == r or r in f.parents), None)
+
+        if section["type"] == "movie":
+            for meta in plex.all(f"/library/sections/{key}/all", type=1, includeGuids=1):
+                parts = [(m, p) for m in meta.get("Media", []) for p in m.get("Part", [])]
+                ids = plex_ids(meta)
+                for media, part in parts:
+                    f = Path(mapped(part["file"]))
+                    if len(parts) > 1:
+                        skipped.append((f, "several files or versions for one movie in Plex"))
+                        continue
+                    if not ids:
+                        skipped.append((f, "not matched in Plex"))
+                        continue
+                    root = root_of(f)
+                    if root is None:
+                        skipped.append((f, "outside the Plex library folders (check PLEX_PATH_MAP)"))
+                        continue
+                    entries.append({"file": f, "root": root, "kind": "movie", "group": f.relative_to(root).parts[0],
+                                    "values": {"title": meta.get("title"), "year": meta.get("year"),
+                                               "edition": meta.get("editionTitle"),
+                                               "resolution": resolution_label(media), **ids}})
+        else:
+            shows = {str(s["ratingKey"]): s for s in plex.all(f"/library/sections/{key}/all", type=2, includeGuids=1)}
+            episodes = plex.all(f"/library/sections/{key}/all", type=4)
+            per_file = {}
+            for ep in episodes:
+                for media in ep.get("Media", []):
+                    for part in media.get("Part", []):
+                        per_file.setdefault(part["file"], []).append((ep, media))
+            for plex_file, uses in per_file.items():
+                f = Path(mapped(plex_file))
+                ep, media = uses[0]
+                show = shows.get(str(ep.get("grandparentRatingKey")), {})
+                ids = plex_ids(show)
+                if len(uses) > 1:
+                    skipped.append((f, "file holds several episodes"))
+                    continue
+                if not ids:
+                    skipped.append((f, "show not matched in Plex"))
+                    continue
+                root = root_of(f)
+                if root is None:
+                    skipped.append((f, "outside the Plex library folders (check PLEX_PATH_MAP)"))
+                    continue
+                entries.append({"file": f, "root": root, "kind": "episode", "group": f.relative_to(root).parts[0],
+                                "values": {"show": show.get("title") or ep.get("grandparentTitle"),
+                                           "title": show.get("title") or ep.get("grandparentTitle"),
+                                           "year": show.get("year"), "season": ep.get("parentIndex"),
+                                           "episode": ep.get("index"), "episode_title": ep.get("title"),
+                                           "resolution": resolution_label(media), **ids}})
+    return entries, skipped
+
+
+def sidecars(video):
+    """Subtitle and info files belonging to ``video``: same folder, its name then a dot."""
+    found = []
+    try:
+        for f in video.parent.iterdir():
+            if f != video and f.is_file() and f.name.startswith(video.stem + ".") \
+                    and f.suffix.lower() in SIDECAR_EXTS:
+                found.append(f)
+    except OSError:
+        pass
+    return sorted(found)
+
+
+def target_for(entry, mode, templates, new_root_suffix="-new"):
+    """Where ``entry`` goes under ``mode``."""
+    f, v = entry["file"], entry["values"]
+    kind = entry["kind"]
+    stem = render(templates["movie_file" if kind == "movie" else "episode_file"], v)
+    if done_suffix(f.stem):
+        stem += SUFFIX
+    name = stem + f.suffix
+    if mode == "rename":
+        return f.parent / name
+    root = entry["root"]
+    if mode == "newtree":
+        root = root.with_name(root.name + new_root_suffix)
+    if kind == "movie":
+        return root / render(templates["movie_folder"], v) / name
+    return root / render(templates["show_folder"], v) / render(templates["season_folder"], v) / name
+
+
+def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suffix="-new"):
+    """Work out every change, skipping clashes and anything outside ``scope``. Returns the plan."""
+    scope = [Path(p).resolve() for p in scope]
+
+    def in_scope(f):
+        return not scope or any(f == s or s in f.parents for s in scope)
+
+    items, skips, unchanged = [], [(str(f), why) for f, why in skipped if in_scope(f)], 0
+    for e in sorted(entries, key=lambda e: str(e["file"])):
+        f = e["file"]
+        if not in_scope(f) or CLEAN_DIR in f.relative_to(e["root"]).parts:
+            continue
+        if not f.exists():
+            skips.append((str(f), "not found here (check PLEX_PATH_MAP)"))
+            continue
+        if (f.parent / CLEAN_DIR).is_dir():
+            skips.append((str(f), "a Clean copy is waiting in this folder: run --replace first"))
+            continue
+        new = target_for(e, mode, templates, new_root_suffix)
+        if new == f:
+            unchanged += 1
+            continue
+        st = f.stat()
+        items.append({"old": str(f), "new": str(new), "root": str(e["root"]), "group": e["group"],
+                      "size": st.st_size, "mtime": st.st_mtime_ns,
+                      "sidecars": [[str(s), str(new.with_name(new.stem + s.name[len(f.stem):]))]
+                                   for s in sidecars(f)]})
+    # Two changes aiming at one name, or a name already in use by another file: leave both alone.
+    targets = {}
+    for it in items:
+        targets.setdefault(it["new"], []).append(it)
+    kept = []
+    for it in items:
+        new = Path(it["new"])
+        if len(targets[it["new"]]) > 1:
+            skips.append((it["old"], f"another file would get the same name: {new.name}"))
+        elif new.exists() and not (mode != "newtree" and os.path.samefile(new, it["old"])):
+            skips.append((it["old"], f"name already in use: {new}"))
+        else:
+            kept.append(it)
+    if folders:
+        groups = list(dict.fromkeys((it["root"], it["group"]) for it in kept))[:folders]
+        kept = [it for it in kept if (it["root"], it["group"]) in groups]
+    return {"version": 1, "created": time.time(), "mode": mode, "templates": templates,
+            "new_root_suffix": new_root_suffix,
+            "items": kept, "skipped": sorted(skips), "unchanged": unchanged}
+
+
+def show_plan(plan):
+    by_root = {}
+    for it in plan["items"]:
+        by_root.setdefault(it["root"], []).append(it)
+    for root, items in by_root.items():
+        print(f"\n{root}")
+        for it in items:
+            old = os.path.relpath(it["old"], root)
+            new = os.path.relpath(it["new"], root)
+            print(f"  {old}\n    -> {new}")
+            for s_old, s_new in it["sidecars"]:
+                print(f"       + {Path(s_old).name}  ->  {Path(s_new).name}")
+    if plan["skipped"]:
+        print(f"\nSkipped ({len(plan['skipped'])}):")
+        for path, why in plan["skipped"]:
+            print(f"  {path}\n    {why}")
+    sc = sum(len(it["sidecars"]) for it in plan["items"])
+    verb = {"rename": "rename", "restructure": "move", "newtree": "hard-link into the new tree"}[plan["mode"]]
+    print(f"\nWill {verb} {len(plan['items'])} video(s)" + (f" and {sc} sidecar file(s)" if sc else "")
+          + f"; {plan['unchanged']} already named right; {len(plan['skipped'])} skipped.")
+
+
+def organize(args, state_dir):
+    env = load_env(args.env_file)
+    url = args.plex_url or env.get("PLEX_URL") or os.environ.get("PLEX_URL")
+    token = env.get("PLEX_TOKEN") or os.environ.get("PLEX_TOKEN")
+    if not url or not token:
+        sys.exit(f"Plex is not set up: put PLEX_URL and PLEX_TOKEN in {args.env_file} (readable by root and media only).")
+    templates = dict(TEMPLATES)
+    for name in TEMPLATES:
+        value = getattr(args, name)
+        if value:
+            templates[name] = value
+    bad = {n: template_problems(t) for n, t in templates.items() if template_problems(t)}
+    if bad:
+        sys.exit("Unknown template tokens: " + "; ".join(f"{n}: {', '.join(b)}" for n, b in bad.items())
+                 + f". Known: {', '.join(sorted(TEMPLATE_TOKENS))}.")
+    pairs = [tuple(p.split("=", 1)) for p in (env.get("PLEX_PATH_MAP") or "").split(",") if "=" in p]
+    print("Reading the library from Plex...")
+    try:
+        entries, skipped = read_library(Plex(url, token), path_mapper(pairs))
+    except OSError as exc:
+        sys.exit(f"Could not read Plex at {url}: {exc}")
+    plan = make_plan(entries, skipped, args.organize, templates, args.paths, args.folders, args.new_root_suffix)
+    show_plan(plan)
+    if not plan["items"]:
+        print("Nothing to change.")
+        return
+    plans = state_dir / "plans"
+    plans.mkdir(parents=True, exist_ok=True)
+    path = plans / f"plan-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    path.write_text(json.dumps(plan, indent=1))
+    print(f"Dry run only: nothing changed. Plan saved as {path}")
+    print(f"To carry it out: tinyclean --apply-plan {path}")
+
+
+def newest(folder, pattern):
+    found = sorted(folder.glob(pattern))
+    return found[-1] if found else None
+
+
+def remove_empty_dirs(start, stop):
+    """Remove ``start`` and its parents while empty, never going above ``stop``."""
+    d = Path(start)
+    stop = Path(stop)
+    while d != stop and stop in d.parents:
+        try:
+            d.rmdir()
+        except OSError:
+            return
+        d = d.parent
+
+
+def apply_plan(plan_arg, state_dir, yes):
+    plans = state_dir / "plans"
+    path = newest(plans, "plan-*.json") if plan_arg == "latest" else Path(plan_arg)
+    if not path or not path.is_file():
+        sys.exit("No saved plan found. Run --organize first.")
+    plan = json.loads(path.read_text())
+    age_h = (time.time() - plan["created"]) / 3600
+    if age_h > PLAN_MAX_AGE_HOURS:
+        sys.exit(f"That plan is {age_h:.0f} hours old; run the dry run again so it matches the library now.")
+    n = len(plan["items"])
+    print(f"Plan {path.name}: {plan['mode']}, {n} video(s).")
+    if not yes:
+        if not sys.stdin.isatty():
+            sys.exit("Not run from a terminal: add --yes to apply.")
+        if input("Type 'apply' to go ahead: ").strip().lower() != "apply":
+            print("Nothing changed.")
+            return
+    link = plan["mode"] == "newtree"
+    undo_dir = state_dir / "undo"
+    undo_dir.mkdir(parents=True, exist_ok=True)
+    undo_path = undo_dir / f"undo-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    log = {"plan": str(path), "mode": plan["mode"], "done": []}
+
+    def record(kind, old, new, root):
+        # The last item is the folder an undo may tidy empty folders up to, and never past.
+        stop = root.with_name(root.name + plan.get("new_root_suffix", "-new")) if link else root
+        log["done"].append([kind, str(old), str(new), str(stop)])
+        undo_path.write_text(json.dumps(log, indent=1))
+
+    def place(old, new, root):
+        if new.exists():
+            return f"name now in use: {new}"
+        new.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if link:
+                os.link(old, new)
+            else:
+                os.rename(old, new)
+        except OSError as exc:
+            return f"could not {'link' if link else 'move'}: {exc}"
+        record("link" if link else "move", old, new, root)
+        return None
+
+    done, problems = 0, []
+    for it in plan["items"]:
+        old, new, root = Path(it["old"]), Path(it["new"]), Path(it["root"])
+        try:
+            st = old.stat()
+        except OSError:
+            problems.append((it["old"], "gone since the dry run"))
+            continue
+        if st.st_size != it["size"] or st.st_mtime_ns != it["mtime"]:
+            problems.append((it["old"], "changed since the dry run"))
+            continue
+        why = place(old, new, root)
+        if why:
+            problems.append((it["old"], why))
+            continue
+        done += 1
+        for s_old, s_new in it["sidecars"]:
+            if Path(s_old).exists():
+                why = place(Path(s_old), Path(s_new), root)
+                if why:
+                    problems.append((s_old, why))
+        if not link:
+            remove_empty_dirs(old.parent, root)
+        print(f"  {'linked' if link else 'done'}  {new}")
+    for p, why in problems:
+        print(f"  [skip] {p}: {why}")
+    print(f"\n{done} of {len(plan['items'])} video(s) {'linked' if link else 'moved'}. "
+          f"Undo log: {undo_path}\nTo put them back: tinyclean --undo {undo_path}")
+    if done and not link:
+        print("Rescan the library in Plex, and Refresh in Sonarr/Radarr.")
+
+
+def undo_run(undo_arg, state_dir, yes):
+    undo_dir = state_dir / "undo"
+    path = newest(undo_dir, "undo-*.json") if undo_arg == "latest" else Path(undo_arg)
+    if not path or not path.is_file():
+        sys.exit("No undo log found.")
+    log = json.loads(path.read_text())
+    print(f"Undo {path.name}: {len(log['done'])} change(s) from a {log['mode']} run.")
+    if not yes:
+        if not sys.stdin.isatty():
+            sys.exit("Not run from a terminal: add --yes to undo.")
+        if input("Type 'undo' to go ahead: ").strip().lower() != "undo":
+            print("Nothing changed.")
+            return
+    put_back, problems = 0, []
+    for kind, old, new, stop in reversed(log["done"]):
+        old, new, stop = Path(old), Path(new), Path(stop)
+        if kind == "move":
+            if not new.exists() or old.exists():
+                problems.append((str(new), "cannot move back: moved again or the old name is in use"))
+                continue
+            old.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(new, old)
+            remove_empty_dirs(new.parent, stop)
+        else:
+            # Only ever remove the second name of a hard link, never the last copy of a video.
+            if not (new.exists() and old.exists() and os.path.samefile(old, new)):
+                problems.append((str(new), "not removed: the original name is gone or changed"))
+                continue
+            new.unlink()
+            remove_empty_dirs(new.parent, stop)
+        put_back += 1
+    for p, why in problems:
+        print(f"  [skip] {p}: {why}")
+    path.rename(path.with_suffix(".undone.json"))
+    print(f"Put back {put_back} of {len(log['done'])} change(s).")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Shrink and normalize video files (see header for rules).")
-    ap.add_argument("paths", nargs="+", help="folders or files to process")
+    ap.add_argument("paths", nargs="*", help="folders or files to process")
     ap.add_argument("--dry-run", action="store_true", help="show the plan for each file, change nothing")
     ap.add_argument("--sample", type=int, metavar="N", help="encode a 60 s clip of the N largest files and report projected savings")
     ap.add_argument("--limit", type=int, default=0, help="stop after N files")
@@ -1545,7 +2002,24 @@ def main():
                     help="compare originals with their Clean copies and report; changes nothing")
     ap.add_argument("--status", action="store_true",
                     help=f"rewrite {STATUS_NAME} at the top of the library and print it")
+    org = ap.add_argument_group("organize (names and folders from Plex's matches; always a dry run first)")
+    org.add_argument("--organize", choices=ORGANIZE_MODES,
+                     help="rename: rename files where they are; restructure: also move them into standard "
+                          "folders; newtree: hard-link everything into a new tree next to the library "
+                          "(<library>-new), leaving the original untouched. Saves a plan; changes nothing")
+    org.add_argument("--apply-plan", metavar="PLAN", help="carry out a saved plan ('latest' for the newest)")
+    org.add_argument("--undo", metavar="LOG", help="put back an applied plan ('latest' for the newest)")
+    org.add_argument("--folders", type=int, default=0, metavar="N",
+                     help="only plan the first N movie or show folders (0 = all)")
+    org.add_argument("--new-root-suffix", default="-new", metavar="TEXT",
+                     help="with newtree: name the new tree <library><TEXT> (default %(default)s)")
+    for name, default in TEMPLATES.items():
+        org.add_argument("--" + name.replace("_", "-"), metavar="TEMPLATE", help=f"default: {default}")
+    org.add_argument("--env-file", default=ENV_FILE, help="where PLEX_URL, PLEX_TOKEN and PLEX_PATH_MAP are kept")
+    org.add_argument("--plex-url", help="use this Plex address instead of the one in the env file")
     args = ap.parse_args()
+    if not args.paths and not (args.apply_plan or args.undo):
+        ap.error("give one or more folders or files")
 
     jf = "/usr/lib/jellyfin-ffmpeg/"
     cfg = dict(DEFAULTS)
@@ -1562,6 +2036,15 @@ def main():
     })
     MEMORY["floor_mb"] = max(0, cfg["min_free_ram_mb"])
 
+    if args.organize or args.apply_plan or args.undo:
+        org_state = Path(args.state_dir)
+        if args.undo:
+            undo_run(args.undo, org_state, args.yes)
+        elif args.apply_plan:
+            apply_plan(args.apply_plan, org_state, args.yes)
+        else:
+            organize(args, org_state)
+        return
     if args.rename_suffix:
         rename_suffix(args.paths, cfg, args.yes)
         return

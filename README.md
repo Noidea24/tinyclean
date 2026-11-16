@@ -68,6 +68,7 @@ tinyclean --dry-run "/data/Episodes/Show"     # show the plan, change nothing
 tinyclean --replace "/data/Episodes/Show"     # swap originals for Clean copies (asks first)
 tinyclean --status "/data/Episodes"           # refresh and print the library status file
 tinyclean --rename-suffix "/data/Episodes"    # old -Clean files -> -noidea, tagged (asks first)
+tinyclean --organize rename "/data/Movies"    # names from Plex's matches; dry run (see Organize)
 ```
 
 Each library gets `_tinyclean-status.txt` at the top (refreshed every couple of
@@ -84,6 +85,68 @@ Other options: `--jobs N`, `--batch N`, `--min-free-gb`, `--keep-hdr`, `--keep-s
 `--limit`, `--retry-failed`, `--state-dir`, `--check`, `--rename-suffix`.
 Tagging old files needs `mkvpropedit` (`apt install mkvtoolnix`). Ctrl+C stops cleanly; touching
 `~/.tinyclean/STOP` finishes the current file, then stops.
+
+## Organize (names and folders from Plex)
+
+Plex has already matched every file, so tinyclean can name files from Plex's
+matches instead of guessing from file names. It only reads from Plex.
+
+Settings live in `/etc/mediatool/mediatool.env` (owner `root`, group `media`,
+mode `640`), never in the repo:
+
+```
+PLEX_URL=http://<plex address>:32400
+PLEX_TOKEN=<your Plex token>
+PLEX_PATH_MAP=<library path inside Plex>=<same folder on this machine>
+```
+
+`PLEX_PATH_MAP` is only needed when Plex sees the library under a different
+path; several pairs are separated by commas, e.g. `/movies=/data/Movies,/tv=/data/Episodes`.
+
+```
+tinyclean --organize rename "/data/Movies"                  # dry run: rename files where they are
+tinyclean --organize restructure --folders 5 "/data/Movies" # dry run: also move into standard folders, 5 folders only
+tinyclean --organize newtree "/data/Movies"                 # dry run: hard-link into /data/Movies-new
+tinyclean --apply-plan latest                               # carry out the last dry run (asks first)
+tinyclean --undo latest                                     # put the last applied run back (asks first)
+```
+
+| Mode | What changes |
+|---|---|
+| `rename` | File names only; folders stay as they are. |
+| `restructure` | Names and folders: `Movie (Year) {tmdb-…}/` and `Show (Year) {tvdb-…}/Season 01/`. Emptied old folders are removed. |
+| `newtree` | Nothing in the library. Every video is hard-linked into a new tree next to it (`<library>-new`, or `--new-root-suffix`), already organised. Hard links take no extra space. Point Plex at the new tree when you are happy, then delete the old one. |
+
+Every `--organize` run is a dry run: it prints every change with the skipped
+files and their reasons at the bottom, and saves the plan in
+`~/.tinyclean/plans/`. `--apply-plan` carries out exactly that plan, refuses one
+older than 24 hours, and skips any file that changed since. Each applied run
+writes an undo log in `~/.tinyclean/undo/`. Undoing a `newtree` run only
+removes the new names, never the last copy of a video.
+
+Subtitle and `.nfo` files named after a video move with it. Files ending in
+`-noidea` keep the suffix. Skipped, with the reason: files Plex has not matched,
+movies split into several files or with several versions, files holding
+several episodes, folders with Clean copies waiting for `--replace`, and any
+change that would clash with another file's name.
+
+Templates (the defaults follow Plex's naming guide):
+
+| Option | Default |
+|---|---|
+| `--movie-folder` | `{title} ({year}) {tmdb-{tmdb}}` |
+| `--movie-file` | `{title} ({year})` |
+| `--show-folder` | `{show} ({year}) {tvdb-{tvdb}}` |
+| `--season-folder` | `Season {season}` |
+| `--episode-file` | `{show} ({year}) - S{season}E{episode} - {episode_title}` |
+
+Tokens: `title year imdb tmdb tvdb show season episode episode_title resolution edition`.
+Seasons and episodes are two digits; `{episode:3}` gives three. A bracket
+group whose token has no value disappears, so `{title} ({imdb}) {year}` gives
+`Heat (tt0113277) 1995`, or `Heat 1995` when Plex has no IMDb id. Examples:
+`--movie-file "{title} ({imdb}) {year}"`, `--movie-file "{title} {year} ({imdb})"`.
+
+After applying, rescan the library in Plex and Refresh in Sonarr/Radarr.
 
 ## Updating
 
@@ -115,6 +178,8 @@ finished and never be converted. The suffix is tinyclean's to give:
 `python3 -m pytest -q` runs the test suite: names and helpers, what is planned
 for each kind of file, the checks a copy must pass, the memory guard, and full
 runs of the command on a small generated library (convert, check, replace, a
-short copy refused, a damaged original, a failed move, `--rename-suffix`). The
+short copy refused, a damaged original, a failed move, `--rename-suffix`), and
+the organizer against a small fake Plex (templates, every mode, clashes, apply,
+undo, stale plans). The
 tests make their own small videos, so they need ffmpeg and ffprobe on PATH.
 GitHub Actions runs them on Python 3.11 and 3.12 for every push and tag.
