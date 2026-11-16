@@ -724,8 +724,8 @@ async function viewNeeds(v) {
   }
   v.append(dsec);
 
-  const leave = async (folder, yes) => {
-    try { await agentApi(w.name, "leave", { folder, leave: yes }); route(); }
+  const leave = async (folder, yes, kind = "unmatched") => {
+    try { await agentApi(w.name, "leave", { folder, leave: yes, kind }); route(); }
     catch (e) { alert(e.message); }
   };
   const usec = h("section", {}, h("h2", { text: `Not matched in Plex (${audit.unmatched.length})` }),
@@ -750,7 +750,14 @@ async function viewNeeds(v) {
       h("td", { class: "path" }, h("details", {},
         h("summary", { text: `${o.folder.split("/").pop()}: ${o.files} file(s)` }),
         ...o.examples.map((x) => h("div", { class: "file-line", text: `${x.code}: your file says “${x.mine}”, Plex says “${x.plex}”` })))),
-      h("td", {}, plexLink(audit, o.plex_key, "Open in Plex") || ""))))));
+      h("td", {}, plexLink(audit, o.plex_key, "Open in Plex") || ""),
+      h("td", {}, h("button", { class: "plain small", text: "Leave as is", title: "Keep this show in your own episode order: Organize never renames or renumbers it", onclick: () => leave(o.folder, true, "order") })))))));
+  const keptOrder = audit.order_left_alone || [];
+  if (keptOrder.length) osec.append(h("details", { class: "fold" }, h("summary", { text: `Kept in your own order (${keptOrder.length}): Organize leaves these alone` }),
+    h("div", { class: "tablewrap" }, h("table", {},
+      ...keptOrder.map((o) => h("tr", {}, h("td", { class: "path", text: o.folder.split("/").pop() }),
+        h("td", { text: `${o.files} file(s)` }),
+        h("td", {}, h("button", { class: "plain small", text: "Undo", onclick: () => leave(o.folder, false, "order") }))))))));
   else osec.append(h("div", { class: "muted", text: "None." }));
   v.append(osec);
 

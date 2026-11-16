@@ -323,3 +323,17 @@ def test_leave_as_is_hides_an_unmatched_folder_until_undone(server, cfg, library
     assert call(f"{url}/api/leave", {"folder": folder, "leave": False})[0] == 200
     _, a = call(f"{url}/api/audit")
     assert a["unmatched"][0]["folder"] == folder
+
+
+def test_leave_as_is_for_a_show_in_its_own_order(server, cfg, library):
+    url, _ = server()
+    show = str(library.resolve() / "Episodes" / "Scooby's All Star Laff-A-Lympics")
+    cfg["engine_state"].mkdir(parents=True, exist_ok=True)
+    (cfg["engine_state"] / "audit.json").write_text(json.dumps(
+        {"created": 1, "unmatched": [], "order": [{"folder": show, "files": 21}], "counts": {"order": 1}}))
+    assert call(f"{url}/api/leave", {"folder": show, "kind": "bogus"})[0] == 400
+    assert call(f"{url}/api/leave", {"folder": show, "kind": "order"})[0] == 200
+    _, a = call(f"{url}/api/audit")
+    assert a["order"] == [] and a["order_left_alone"][0]["folder"] == show
+    saved = json.loads((cfg["engine_state"] / "left-alone.json").read_text())
+    assert saved["order"] == [show] and saved["unmatched"] == []

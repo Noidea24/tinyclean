@@ -417,36 +417,49 @@ def status(cfg, jobs, started):
 LEFT_FILE = "left-alone.json"
 
 
-def left_alone(cfg):
-    """Folders the person marked "Leave as is" on Needs you (unmatched in Plex on purpose)."""
+LEFT_KINDS = ("unmatched", "order")
+
+
+def left_alone_all(cfg):
+    """{kind: folders} the person marked "Leave as is" on Needs you: unmatched in Plex on purpose, or a
+    show kept in their own episode order (Organize never touches those)."""
     try:
-        return set(json.loads((cfg["engine_state"] / LEFT_FILE).read_text()).get("unmatched", []))
-    except (OSError, ValueError, AttributeError):
-        return set()
+        d = json.loads((cfg["engine_state"] / LEFT_FILE).read_text())
+        return {k: set(d.get(k, [])) for k in LEFT_KINDS}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {k: set() for k in LEFT_KINDS}
 
 
-def set_left_alone(cfg, folder, leave):
+def left_alone(cfg, kind="unmatched"):
+    return left_alone_all(cfg)[kind]
+
+
+def set_left_alone(cfg, folder, leave, kind="unmatched"):
+    if kind not in LEFT_KINDS:
+        raise BadRequest("kind must be unmatched or order")
     if not isinstance(folder, str) or not folder or len(folder) > 4096:
         raise BadRequest("give the folder")
     if not any(folder == str(r) or folder.startswith(str(r).rstrip("/") + "/") for r in cfg["roots"]):
         raise BadRequest("that folder is not in this worker's libraries")
-    folders = left_alone(cfg)
-    (folders.add if leave else folders.discard)(folder)
+    every = left_alone_all(cfg)
+    (every[kind].add if leave else every[kind].discard)(folder)
     cfg["engine_state"].mkdir(parents=True, exist_ok=True)
     f = cfg["engine_state"] / LEFT_FILE
     tmp = f.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"unmatched": sorted(folders)}, indent=1))
+    tmp.write_text(json.dumps({k: sorted(v) for k, v in every.items()}, indent=1))
     tmp.replace(f)
 
 
 def read_audit(cfg):
     """The last library check, with folders marked "Leave as is" moved out of the unmatched list."""
     a = json.loads((cfg["engine_state"] / "audit.json").read_text())
-    keep = left_alone(cfg)
-    if keep and isinstance(a.get("unmatched"), list):
-        a["left_alone"] = [u for u in a["unmatched"] if u.get("folder") in keep]
-        a["unmatched"] = [u for u in a["unmatched"] if u.get("folder") not in keep]
-        a.setdefault("counts", {})["unmatched"] = len(a["unmatched"])
+    every = left_alone_all(cfg)
+    for kind, out in (("unmatched", "left_alone"), ("order", "order_left_alone")):
+        keep = every[kind]
+        if keep and isinstance(a.get(kind), list):
+            a[out] = [u for u in a[kind] if u.get("folder") in keep]
+            a[kind] = [u for u in a[kind] if u.get("folder") not in keep]
+            a.setdefault("counts", {})[kind] = len(a[kind])
     return a
 
 
@@ -706,10 +719,11 @@ def make_handler(cfg, jobs, started):
                 return self.send(202, {"ok": True, "message": "update requested; the agent restarts in a minute"})
             if parts == ["api", "leave"]:
                 try:
-                    set_left_alone(cfg, body.get("folder"), body.get("leave", True) is not False)
+                    set_left_alone(cfg, body.get("folder"), body.get("leave", True) is not False,
+                                   body.get("kind") or "unmatched")
                 except BadRequest as exc:
                     return self.send(400, {"error": str(exc)})
-                return self.send(200, {"left_alone": sorted(left_alone(cfg))})
+                return self.send(200, {k: sorted(v) for k, v in left_alone_all(cfg).items()})
             if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "stop":
                 job = jobs.stop(parts[2], after_current=bool(body.get("after_current")))
                 return self.send(200, summary(job)) if job else self.send(404, {"error": "no such job"})

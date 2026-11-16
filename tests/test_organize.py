@@ -828,3 +828,42 @@ def test_duplicates_show_what_tells_the_copies_apart(tc, lib, tmp_path, monkeypa
     d = next(d for d in a["duplicates"] if d["title"] == "Heat")
     f = next(f for f in d["files"] if f["file"] == str(other))
     assert (f["minutes"], f["picture"], f["audio"], f["sub_tracks"], f["srt_lines"]) == (110.0, "1280x720", ["eng 2ch"], 1, 2)
+
+
+def test_a_year_before_the_title_is_not_part_of_it(tc):
+    assert tc.title_from_name("Scooby Doo And Scrappy Doo - S02E06 - (1979) Stow-Aways-noidea.mkv") == "Stow-Aways"
+    assert tc.JUNK_NAME.search("Thumbs.db") and tc.JUNK_NAME.search("desktop.ini")
+
+
+def test_a_file_named_for_two_segments_gets_both_numbers(tc, lib):
+    """Rocket Power: 'Secret Spot - Ice Queens' sits at S01E02, but Plex has those as S01E03 and S01E04."""
+    d = lib["shows"] / "breaking bad" / "S1"
+    pair = touch(d / "s01e02 - Secret Spot - Ice Queens-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 2, "Down the Drain", str(pair)))
+    for n, t in ((3, "Secret Spot"), (4, "Ice Queens")):
+        other = touch(d / f"s01e0{n} - somewhere else {n}-noidea.mkv")
+        lib["plex"].episodes.append(episode("10", 1, n, t, str(other)))
+    p = plan(tc, lib, "rename")
+    new = {it["old"]: it for it in p["items"]}
+    # the files now at E03/E04 stay there, so moving the pair onto them would stack two files: refused
+    assert "new duplicate" in dict(p["skipped"])[str(pair)]
+    for n in (3, 4):
+        (d / f"s01e0{n} - somewhere else {n}-noidea.mkv").unlink()
+    lib["plex"].episodes = [e for e in lib["plex"].episodes if "somewhere" not in e["Media"][0]["Part"][0]["file"]]
+    # with Plex's titles known from elsewhere in the show, the pair is renumbered as a range
+    lib["plex"].episodes.append(episode("10", 1, 3, "Secret Spot", str(touch(d / "x" / "keep3.mkv"))))
+    lib["plex"].episodes.append(episode("10", 1, 4, "Ice Queens", str(touch(d / "x" / "keep4.mkv"))))
+    entries, skipped = tc.read_library(lib["plex"], lambda p: p)
+    hit = tc.two_part_hit(tc.episode_index(entries), next(e for e in entries if e["file"] == pair), "Secret Spot - Ice Queens")
+    assert hit == (1, 3, 4, "Secret Spot & Ice Queens")
+
+
+def test_left_alone_folders_are_never_touched(tc, lib, tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "left-alone.json").write_text(json.dumps({"order": [str(lib["shows"] / "breaking bad")]}))
+    entries, skipped = tc.read_library(lib["plex"], lambda p: p)
+    p = tc.make_plan(entries, skipped, "rename", dict(tc.TEMPLATES), (), left_alone=tc.left_alone_folders(state))
+    assert not [it for it in p["items"] if "breaking bad" in it["old"]]
+    assert "left as is" in dict(p["skipped"])[str(lib["ep1"])]
+    assert [it for it in p["items"] if it["old"] == str(lib["matrix"])]

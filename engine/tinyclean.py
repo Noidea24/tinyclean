@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.10"
+VERSION = "8.5.11"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1743,7 +1743,7 @@ ARTWORK_TAGS = ("thumb", "poster", "fanart", "banner", "landscape", "clearart", 
 
 JUNK_NAME = re.compile(r"^www\..+\.(jpe?g|png|gif|txt|url|html?)$"
                        r"|(yts|yify|rarbg|eztv|ettv|etrg|torrentgalaxy).*\.(txt|url|html?|exe)$"
-                       r"|\.url$", re.I)
+                       r"|\.url$|^(thumbs\.db|desktop\.ini|\.ds_store)$", re.I)
 SUB_EXTS = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup"}
 TEXT_SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt"}
 SUBS_DIRS = {"subs", "sub", "subtitles"}
@@ -1880,6 +1880,7 @@ def title_from_name(name):
     if not m:
         return None
     rest = re.sub(r"\[[^\]]*\]", " ", stem[m.end():])
+    rest = re.sub(r"^[\s._-]*\(\s*(?:19|20)\d\d\s*\)", " ", rest)     # '- (1979) Stow-Aways'
     rest = re.sub(r"(?i)[ ._(-]*\b(hevc|x26[45]|h\.?26[45]|xvid|divx|web-?dl|web-?rip|web|amzn|nf|hulu|dsnp|hmax|"
                   r"pcok|bluray|blu-ray|brrip|bdrip|dvdrip|dvd|hdtv|sdtv|remux|remastered|proper|repack|nordic|"
                   r"r\dj?dvd|\d{3,4}p|\d{3,4}x\d{3,4}|10bit|ddp?\d?)\b.*$", "", rest)
@@ -1982,8 +1983,32 @@ def labels_agree(mine, builtin):
     return len(a) >= 5 and a in b
 
 
+def two_part_hit(index, e, mine):
+    """A file named for two segments ('Secret Spot - Ice Queens', 'A & B', 'A / B') whose halves are
+    Plex's episodes next to each other in one season: (season, first, last, "A & B"), else None."""
+    parts = [p.strip() for p in re.split(r"\s+(?:-|&|/)\s+", mine)]
+    if len(parts) != 2 or min(len(p) for p in parts) < 3:
+        return None
+    hits = [title_hit(index, e, p) for p in parts]
+    if not all(hits) or hits[0][0] != hits[1][0]:
+        return None
+    (s, a, ta), (_, b, tb) = sorted(hits, key=lambda h: int(h[1] or 0))
+    if int(b or 0) - int(a or 0) != 1:
+        return None
+    return s, int(a), int(b), f"{ta} & {tb}"
+
+
+def left_alone_folders(state_dir):
+    """Show and movie folders the person marked "Leave as is" on Needs you: Organize never touches them."""
+    try:
+        d = json.loads((Path(state_dir) / "left-alone.json").read_text())
+        return {f for k in ("unmatched", "order") for f in d.get(k, [])}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return set()
+
+
 def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suffix="-new", two_episode="name",
-              cleanup=True, ffprobe_bin=None):
+              cleanup=True, ffprobe_bin=None, left_alone=()):
     """Work out every change, skipping clashes and anything outside ``scope``. Returns the plan."""
     scope = [Path(p).resolve() for p in scope]
 
@@ -2000,6 +2025,9 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
         note = None
         f = e["file"]
         if not in_scope(f) or CLEAN_DIR in f.relative_to(e["root"]).parts:
+            continue
+        if left_alone and any(str(p) in left_alone for p in f.parents):
+            skips.append((str(f), "left as is: you chose Leave as is for this folder on Needs you"))
             continue
         if not f.exists():
             skips.append((str(f), "not found here (check PLEX_PATH_MAP)"))
@@ -2023,18 +2051,25 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                     v = e["values"]
                     code = f"S{int(v.get('season') or 0):02d}E{int(v.get('episode') or 0):02d}"
                     hit = title_hit(index, e, mine)
-                    inside = builtin_title(ffprobe_bin, f) if hit else None
-                    if hit and inside and not labels_agree(mine, inside):
+                    pair = None if hit else two_part_hit(index, e, mine)
+                    inside = builtin_title(ffprobe_bin, f) if (hit or pair) else None
+                    if (hit or pair) and inside and not labels_agree(mine, inside):
                         skips.append((str(f), f"labels disagree: the file name says \u201c{mine}\u201d but the title "
                                               f"inside the file says \u201c{inside}\u201d, so it is not renumbered: "
                                               "play it to see which is right"))
                         continue
                     if hit and (hit[0], hit[1]) != (v.get("season"), v.get("episode")):
                         s, n, t = hit
-                        moves[str(f)] = (e.get("section"), v.get("tvdb") or v.get("show"), s, n)
+                        moves[str(f)] = [(e.get("section"), v.get("tvdb") or v.get("show"), s, n)]
                         note = (f"renumbered: the file's title \u201c{mine}\u201d is Plex's "
                                 f"S{int(s or 0):02d}E{int(n):02d}, not {code} \u201c{plex_title}\u201d")
                         e = {**e, "values": {**v, "season": s, "episode": n, "episode_title": t}}
+                    elif pair:
+                        s, a, b, t = pair
+                        note = (f"renumbered: the file holds two of Plex's episodes, S{int(s or 0):02d}E{a:02d} and "
+                                f"E{b:02d} (\u201c{t}\u201d), not {code} \u201c{plex_title}\u201d")
+                        moves[str(f)] = [(e.get("section"), v.get("tvdb") or v.get("show"), s, n) for n in (a, b)]
+                        e = {**e, "values": {**as_multi_episode(v, (s, a, b)), "episode_title": t}}
                     else:
                         skips.append((str(f), "the titles in the file names don't match Plex's titles for those "
                                               "episode numbers, so Plex is showing the wrong episodes for them now: "
@@ -2066,13 +2101,14 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
             v, f = e["values"], str(e["file"])
             show = (e.get("section"), v.get("tvdb") or v.get("show"))
             rng = e.get("multi") or multi_episode_range(e["file"].name)
-            nums = [moves[f][2:]] if f in moves else (
+            nums = [m[2:] for m in moves[f]] if f in moves else (
                 [(rng[0], n) for n in range(rng[1], rng[2] + 1)] if rng else [(v.get("season"), v.get("episode"))])
             for s, n in nums:
                 held.setdefault((*show, s, n), []).append(f)
-        clash = {f for f, num in moves.items() if len(held.get(num, [])) > 1}
+        clash = {f: [m for m in ms if len(held.get(m, [])) > 1] for f, ms in moves.items()}
+        clash = {f: ms for f, ms in clash.items() if ms}
         for it in [it for it in items if it["old"] in clash]:
-            s, n = moves[it["old"]][2:]
+            s, n = clash[it["old"]][0][2:]
             skips.append((it["old"], f"not renumbered: another file already holds S{int(s or 0):02d}E{int(n):02d}, "
                                      "and two files on one episode would be a new duplicate"))
         items = [it for it in items if it["old"] not in clash]
@@ -2413,7 +2449,8 @@ def organize(args, state_dir, ffprobe_bin=None):
             print(f"  {sec.get('title', '?')} [{sec['type']}]: {seen}")
     print(f"Plex knows {len(entries) + len(skipped)} video file(s) in these folders.")
     plan = make_plan(entries, skipped, args.organize, templates, args.paths, args.folders, args.new_root_suffix,
-                     args.two_episode, cleanup=not args.keep_leftovers, ffprobe_bin=ffprobe_bin)
+                     args.two_episode, cleanup=not args.keep_leftovers, ffprobe_bin=ffprobe_bin,
+                     left_alone=left_alone_folders(state_dir))
     show_plan(plan)
     if not plan["items"]:
         if entries and not plan["skipped"] and not plan["unchanged"]:
@@ -2764,7 +2801,7 @@ def audit(args, state_dir, ffprobe_bin=None):
         mine, theirs = title_from_name(f.name), v.get("episode_title")
         if not mine or is_placeholder_title(theirs) or titles_agree(mine, theirs):
             continue
-        if title_hit(index, e, mine):
+        if title_hit(index, e, mine) or two_part_hit(index, e, mine):
             continue                    # the organizer renumbers this one by itself
         key = folder_of(str(f))
         o = order.setdefault(key, {"folder": key, "title": v.get("show"), "files": 0, "examples": [],
