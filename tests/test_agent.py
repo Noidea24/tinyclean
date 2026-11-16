@@ -288,6 +288,10 @@ def test_audit_and_delete_jobs(agent_mod, cfg, library):
         agent_mod.build_argv("delete", {"paths": [str(film.parent)], "confirm": True}, cfg)
     assert "--two-episode" in agent_mod.build_argv("organize", {"paths": [str(library)], "mode": "rename",
                                                                 "two_episode": "skip"}, plex)
+    assert "--keep-leftovers" in agent_mod.build_argv("organize", {"paths": [str(library)], "mode": "rename",
+                                                                   "cleanup": False}, plex)
+    assert "--keep-leftovers" not in agent_mod.build_argv("organize", {"paths": [str(library)], "mode": "rename",
+                                                                       "cleanup": True}, plex)
 
 
 def test_update_is_only_a_request_for_the_root_service(server, tmp_path, monkeypatch, agent_mod):

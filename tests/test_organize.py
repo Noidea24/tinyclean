@@ -95,6 +95,7 @@ def test_default_templates_follow_plex_naming(tc):
     v = {"title": "The Matrix", "year": 1999, "tmdb": "603", "imdb": "tt0133093"}
     assert tc.render(tc.TEMPLATES["movie_folder"], v) == "The Matrix (1999) {tmdb-603}"
     assert tc.render(tc.TEMPLATES["movie_file"], v) == "The Matrix (1999)"
+    assert tc.render(tc.TEMPLATES["movie_file"], {**v, "edition": "Unrated"}) == "The Matrix (1999) {edition-Unrated}"
     e = {"show": "Breaking Bad", "year": 2008, "tvdb": "81189", "season": 1, "episode": 2,
          "episode_title": "Cat's in the Bag..."}
     assert tc.render(tc.TEMPLATES["show_folder"], e) == "Breaking Bad (2008) {tvdb-81189}"
@@ -654,3 +655,110 @@ def test_audit_lists_shows_whose_episode_order_differs(tc, lib, tmp_path, monkey
     a = run_audit(tc, lib, tmp_path, monkeypatch)
     assert [(o["folder"].split("/")[-1], o["files"]) for o in a["order"]] == [("breaking bad", 2)]
     assert sorted(x["plex"] for x in a["order"][0]["examples"]) == ["Delta", "Gamma"]
+
+
+def test_two_editions_of_one_movie_get_their_own_names(tc, lib):
+    cut = touch(lib["movies"] / "the.matrix.1999.1080p" / "The.Matrix.1999.UNRATED-noidea.mkv")
+    m = movie("The Matrix", 1999, str(cut))
+    m["editionTitle"] = "Unrated"
+    lib["plex"].movies.append(m)
+    p = plan(tc, lib, "rename")
+    names = sorted(Path(i["new"]).name for i in p["items"] if "Matrix" in i["new"])
+    assert names == ["The Matrix (1999) {edition-Unrated}-noidea.mkv", "The Matrix (1999)-noidea.mkv"]
+
+
+# ----------------------------------------------------------------- cleanup --
+
+def test_subtitle_languages_from_real_download_names(tc):
+    lang = tc.sub_language
+    for label in ["French.fre", "Spanish (Latin America).spa", "Portuguese (Brazil).por", "Chinese (Traditional).chi",
+                  "Norwegian.nob", "Filipino.fil", "Malay.may", "3_French", ".fr", ".de.forced"]:
+        assert lang(label) not in (None, "en"), label
+    for label in ["English", "English (SDH).eng", "SDH.eng.HI", "2_English", ".en", ".en.forced", "eng"]:
+        assert lang(label) == "en", label
+    # Not purely a language: kept.
+    for label in ["", ".", "What Is It", "Commentary", "Bad Taste 1987"]:
+        assert lang(label) is None, label
+    assert tc.sub_kind("English (SDH).eng") == "sdh" and tc.sub_kind("SDH.eng.HI") == "sdh"
+    assert tc.sub_kind(".en.forced") == "forced" and tc.sub_kind("English") == ""
+
+
+def test_junk_names(tc):
+    for n in ["www.YTS.MX.jpg", "WWW.YTS.AG.jpg", "YTSProxies.com.txt", "YIFYStatus.com.txt",
+              "YTSYifyUP... (TOR).txt", "RARBG.txt", "RARBG_DO_NOT_MIRROR.exe", "Visit us.url"]:
+        assert tc.JUNK_NAME.search(n), n
+    for n in ["poster.jpg", "fanart.jpg", "clearlogo.png", "movieset-poster.jpg", "notes.txt", "Movie.nfo"]:
+        assert not tc.JUNK_NAME.search(n), n
+
+
+def yts_movie(lib):
+    d = lib["movies"] / "Andrew Schulz Life (2025)"
+    v = touch(d / "Andrew.Schulz.Life.2025.1080p.WEBRip.x264.AAC5.1-[YTS.MX]-noidea.mkv")
+    for n in ["www.YTS.MX.jpg", "YTSProxies.com.txt", "poster.jpg"]:
+        touch(d / n, b"x")
+    touch(d / "Subs" / "English (SDH).eng.srt", b"sdh subs")
+    touch(d / "Subs" / "English.srt", b"plain subs, longer")
+    touch(d / "Subs" / "French.fre.srt", b"fr")
+    touch(d / "Subs" / "Arabic.ara.srt", b"ar")
+    touch(d / "Subs" / "Commentary.srt", b"c")
+    touch(v.with_name(v.stem + ".fr.srt"), b"fr")
+    lib["plex"].movies.append(movie("Andrew Schulz - Life", 2025, str(v), guids=("tmdb://1435760",)))
+    return d, v
+
+
+def test_restructure_deletes_download_leftovers_and_names_english_subs(tc, lib):
+    d, v = yts_movie(lib)
+    p = plan(tc, lib, "restructure", scope=[d])
+    assert sorted(Path(x["path"]).name for x in p["deletes"]) == sorted(
+        ["www.YTS.MX.jpg", "YTSProxies.com.txt", "French.fre.srt", "Arabic.ara.srt", v.stem + ".fr.srt"])
+    assert p["items"][0]["sidecars"] == []
+    moves = {Path(x["old"]).name: Path(x["new"]) for x in p["extras"]}
+    base = "Andrew Schulz - Life (2025)-noidea"
+    assert moves["English.srt"].name == base + ".en.srt"
+    assert moves["English (SDH).eng.srt"].name == base + ".en.sdh.srt"
+    assert moves["English.srt"].parent == Path(p["items"][0]["new"]).parent
+    assert moves["Commentary.srt"].parts[-2] == "Subs"          # not a language: moved along as it is
+    assert moves["poster.jpg"].name == "poster.jpg"
+
+
+def test_apply_deletes_only_the_listed_leftovers(tc, lib, tmp_path):
+    d, v = yts_movie(lib)
+    state = tmp_path / "state"
+    p = plan(tc, lib, "restructure", scope=[d])
+    tc.apply_plan(str(save(tc, state, p)), state, yes=True, env_file=str(tmp_path / "none.env"))
+    new = lib["movies"] / "Andrew Schulz - Life (2025) {tmdb-1435760}"
+    assert sorted(tree(new)) == sorted([
+        "Andrew Schulz - Life (2025)-noidea.mkv", "Andrew Schulz - Life (2025)-noidea.en.srt",
+        "Andrew Schulz - Life (2025)-noidea.en.sdh.srt", "poster.jpg", "Subs/Commentary.srt"])
+    assert not d.exists()
+    logged = [json.loads(l)["file"] for l in (state / "deleted.log").read_text().splitlines()]
+    assert len(logged) == 5
+
+
+def test_keep_leftovers_and_newtree_delete_nothing(tc, lib):
+    d, v = yts_movie(lib)
+    entries, skipped = tc.read_library(lib["plex"], lambda p: p)
+    off = tc.make_plan(entries, skipped, "restructure", dict(tc.TEMPLATES), [d], cleanup=False)
+    assert off["deletes"] == [] and len(off["items"][0]["sidecars"]) == 1
+    nt = tc.make_plan(entries, skipped, "newtree", dict(tc.TEMPLATES), [d])
+    assert nt["deletes"] == []
+    assert not any("YTS" in x["old"] or "French" in x["old"] for x in nt["extras"])
+
+
+def test_rename_mode_cleans_a_folder_that_keeps_its_name(tc, lib):
+    d, v = yts_movie(lib)
+    p = plan(tc, lib, "rename", scope=[d])
+    assert len(p["deletes"]) == 5
+    moves = {Path(x["old"]).name: Path(x["new"]).name for x in p["extras"]}
+    assert moves == {"English.srt": "Andrew Schulz - Life (2025)-noidea.en.srt",
+                     "English (SDH).eng.srt": "Andrew Schulz - Life (2025)-noidea.en.sdh.srt"}
+
+
+def test_episode_subs_folders_follow_their_episode(tc, lib):
+    ep = lib["ep1"]
+    sub = touch(ep.parent / "Subs" / ep.stem / "2_English.srt", b"en")
+    touch(ep.parent / "Subs" / ep.stem / "3_Spanish.srt", b"es")
+    p = plan(tc, lib, "restructure", scope=[lib["shows"]])
+    assert [Path(x["path"]).name for x in p["deletes"]] == ["3_Spanish.srt"]
+    x = next(x for x in p["extras"] if x["old"] == str(sub))
+    assert Path(x["new"]).name == "Breaking Bad (2008) - S01E01 - Pilot.en.srt"

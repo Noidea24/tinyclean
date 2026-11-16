@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.1"
+VERSION = "8.5.2"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1516,7 +1516,7 @@ def describe(plan):
 ORGANIZE_MODES = ("rename", "restructure", "newtree")
 TEMPLATES = {
     "movie_folder": "{title} ({year}) {tmdb-{tmdb}}",
-    "movie_file": "{title} ({year})",
+    "movie_file": "{title} ({year}) {edition-{edition}}",
     "show_folder": "{show} ({year}) {tvdb-{tvdb}}",
     "season_folder": "Season {season}",
     "episode_file": "{show} ({year}) - S{season}E{episode} - {episode_title}",
@@ -1730,6 +1730,60 @@ ARTWORK_EXTS = {".jpg", ".jpeg", ".png", ".tbn", ".webp"}
 ARTWORK_TAGS = ("thumb", "poster", "fanart", "banner", "landscape", "clearart", "logo")
 
 
+# ----------------------------------------------------------------- cleanup --
+# Download leftovers the organizer deletes (each one listed in the plan): the ads release groups put in
+# their folders, and subtitles in other languages than English. English subtitles in a Subs folder get
+# their video's name, so Plex finds them.
+
+JUNK_NAME = re.compile(r"^www\..+\.(jpe?g|png|gif|txt|url|html?)$"
+                       r"|(yts|yify|rarbg|eztv|ettv|etrg|torrentgalaxy).*\.(txt|url|html?|exe)$"
+                       r"|\.url$", re.I)
+SUB_EXTS = {".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup"}
+TEXT_SUB_EXTS = {".srt", ".ass", ".ssa", ".vtt"}
+SUBS_DIRS = {"subs", "sub", "subtitles"}
+ENGLISH = {"en", "eng", "english"}
+LANGUAGES = {
+    "arabic": "ar ara", "bengali": "bn ben", "bulgarian": "bg bul", "catalan": "ca cat",
+    "chinese": "zh chi zho chs cht", "croatian": "hr hrv", "czech": "cs cze ces", "danish": "da dan",
+    "dutch": "nl dut nld", "estonian": "et est", "filipino": "fil tl tgl tagalog", "finnish": "fi fin",
+    "french": "fr fre fra", "german": "de ger deu", "greek": "el gre ell", "hebrew": "he heb",
+    "hindi": "hi hin", "hungarian": "hu hun", "icelandic": "is ice isl", "indonesian": "id ind",
+    "italian": "it ita", "japanese": "ja jpn", "korean": "ko kor", "latvian": "lv lav",
+    "lithuanian": "lt lit", "malay": "ms may msa", "norwegian": "no nor nob nno", "persian": "fa per fas farsi",
+    "polish": "pl pol", "portuguese": "pt por pob", "romanian": "ro rum ron", "russian": "ru rus",
+    "serbian": "sr srp scc", "slovak": "sk slo slk", "slovenian": "sl slv", "spanish": "es spa",
+    "swedish": "sv swe", "tamil": "ta tam", "telugu": "te tel", "thai": "th tha", "turkish": "tr tur",
+    "ukrainian": "uk ukr", "vietnamese": "vi vie", "basque": "eu baq eus", "galician": "gl glg",
+    "cantonese": "yue", "mandarin": "cmn",
+}
+FOREIGN = {n for k, v in LANGUAGES.items() for n in [k, *v.split()]}
+SUB_TAGS = {"sdh", "hi", "cc", "forced", "full", "default", "sub", "subs", "subtitle", "subtitles", "latin",
+            "america", "american", "brazil", "brazilian", "spain", "portugal", "european", "canada",
+            "canadian", "traditional", "simplified", "hans", "hant", "br", "mx", "la", "lat"}
+
+
+def sub_language(label):
+    """'en', a language name, or None when the label is not purely a language (keep the file).
+    The label is the part of a subtitle's name that is not the video's: '2_English', 'French.fre',
+    'English (SDH).eng', '.fr.forced'."""
+    words = [w for w in re.split(r"[\s._\-\[\]()]+", re.sub(r"^\d+[_ .-]*", "", label).lower()) if w]
+    if not words or not all(w in ENGLISH | FOREIGN | SUB_TAGS or w.isdigit() for w in words):
+        return None
+    if any(w in ENGLISH for w in words):
+        return "en"
+    foreign = [w for w in words if w in FOREIGN]
+    if not foreign:
+        return None
+    w = foreign[0]
+    return w if w in LANGUAGES else next(k for k, v in LANGUAGES.items() if w in v.split())
+
+
+def sub_kind(label):
+    """'sdh', 'forced' or '' for an English subtitle's label."""
+    words = set(re.split(r"[\s._\-\[\]()]+", label.lower()))
+    return "forced" if "forced" in words else "sdh" if words & {"sdh", "hi", "cc"} else ""
+
+
 def sidecar_parts(video):
     """Files belonging to ``video``, as (file, the rest of its name after the video's name).
     Subtitles and .nfo: '<video name>.en.srt'. Artwork: '<video name>.jpg' or '<video name>-thumb.jpg'.
@@ -1872,7 +1926,8 @@ def as_multi_episode(values, rng):
     return {**values, "season": season, "episode": f"{first:02d}-E{last:02d}", "episode_title": None}
 
 
-def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suffix="-new", two_episode="name"):
+def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suffix="-new", two_episode="name",
+              cleanup=True):
     """Work out every change, skipping clashes and anything outside ``scope``. Returns the plan."""
     scope = [Path(p).resolve() for p in scope]
 
@@ -1880,6 +1935,7 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
         return not scope or any(f == s or s in f.parents for s in scope)
 
     items, skips, unchanged = [], [(str(f), why) for f, why in skipped if in_scope(f)], 0
+    drops = []
 
     def season_key(e):
         v = e["values"]
@@ -1932,12 +1988,17 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
             unchanged += 1
             continue
         st = f.stat()
+        sides = []
+        for s, rest in sidecar_parts(f):
+            lang = sub_language(rest[:-len(s.suffix)]) if s.suffix.lower() in SUB_EXTS else None
+            if cleanup and lang and lang != "en":
+                drops.append({**drop(s, e, f"{lang.capitalize()} subtitles"), "video": str(f)})
+                continue
+            sides.append([str(s), str(new.with_name(
+                (new.stem if not rest.startswith("-") else strip_suffix(new.name)) + rest))])
         items.append({"old": str(f), "new": str(new), "root": str(e["root"]), "group": e["group"],
                       "section": e.get("section"), "note": note,
-                      "size": st.st_size, "mtime": st.st_mtime_ns,
-                      "sidecars": [[str(s), str(new.with_name(
-                                       (new.stem if not rest.startswith("-") else strip_suffix(new.name)) + rest))]
-                                   for s, rest in sidecar_parts(f)]})
+                      "size": st.st_size, "mtime": st.st_mtime_ns, "sidecars": sides})
     # Two changes aiming at one name, or a name already in use by another file: leave both alone.
     targets = {}
     for it in items:
@@ -1955,10 +2016,16 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
         groups = list(dict.fromkeys((it["root"], it["group"]) for it in kept))[:folders]
         kept = [it for it in kept if (it["root"], it["group"]) in groups]
     leftovers = []
-    extras = [] if mode == "rename" else plan_extras(kept, mode, new_root_suffix, skips, leftovers)
+    extras = plan_extras(kept, mode, new_root_suffix, skips, leftovers, drops if cleanup else None)
+    groups = {(it["root"], it["group"]) for it in kept}
+    kept_olds = {it["old"] for it in kept}
+    deletes = [] if mode == "newtree" else sorted(
+        {d["path"]: d for d in drops
+         if (d["root"], d["group"]) in groups and (d.get("video") is None or d["video"] in kept_olds)}.values(),
+        key=lambda d: d["path"])
     return {"version": 1, "created": time.time(), "mode": mode, "templates": templates,
             "new_root_suffix": new_root_suffix, "roots": sorted({str(e["root"]) for e in entries}),
-            "items": kept, "extras": extras, "clean_leftovers": leftovers,
+            "items": kept, "extras": extras, "clean_leftovers": leftovers, "deletes": deletes,
             "skipped": sorted(skips), "unchanged": unchanged}
 
 
@@ -1985,11 +2052,13 @@ def only_own_files(clean):
         return False
 
 
-def plan_extras(items, mode, new_root_suffix, skips, leftovers):
+def plan_extras(items, mode, new_root_suffix, skips, leftovers, drops=None):
     """Everything else in a movie's or show's old folder (posters, .nfo files, extras, subtitle folders)
     goes along with its videos, so the old folder ends up empty and is removed. Only when that folder
     belongs to this one movie or show alone: a movie folder with another movie directly in it, or a show
-    folder with an episode that is not moving, keeps everything that is not a planned video."""
+    folder with an episode that is not moving, keeps everything that is not a planned video.
+    With ``drops`` (a list to add to), download ads and other-language subtitles found there are listed
+    for deleting instead, and English subtitles in a Subs folder get their video's name next to it."""
     by_group = {}
     for it in items:
         by_group.setdefault((it["root"], it["group"]), []).append(it)
@@ -2004,15 +2073,20 @@ def plan_extras(items, mode, new_root_suffix, skips, leftovers):
         if len(tops) != 1:
             continue
         top = new_root / tops.pop()
-        if mode != "newtree" and top == gdir:
-            continue                    # the folder keeps its name; its other files are already in place
+        # The folder keeps its name: its other files are already in place, only the cleanup applies.
+        stay = mode != "newtree" and top == gdir
+        if stay and drops is None:
+            continue
         planned = {it["old"] for it in its} | {s_old for it in its for s_old, _ in it["sidecars"]}
+        planned |= {d["path"] for d in drops or ()}     # other-language subtitles beside a video
+        taken = {s_new for it in its for _, s_new in it["sidecars"]}
         movie = Path(its[0]["new"]).parent == top and len(its) == 1
         parents = {}
         for it in its:
             parents.setdefault(str(Path(it["old"]).parent), set()).add(str(Path(it["new"]).parent))
         mine, blocked = [], None
         syno = []
+        english = {}                    # video item -> [(file, kind)]
         for dirpath, dirnames, filenames in os.walk(gdir):
             syno += [Path(dirpath) / d for d in dirnames if d == SYNO_DIR]
             dirnames[:] = [d for d in dirnames if d not in (CLEAN_DIR, SYNO_DIR)]
@@ -2021,11 +2095,36 @@ def plan_extras(items, mode, new_root_suffix, skips, leftovers):
                 if str(f) in planned:
                     continue
                 if f.suffix.lower() in VIDEO_EXTS and (not movie or f.parent == gdir):
-                    blocked = f
-                    break
+                    blocked = blocked or f
+                    continue
+                if drops is not None and JUNK_NAME.search(f.name):
+                    drops.append(drop(f, {"root": root, "group": group}, "download ad"))
+                    continue
+                if drops is not None and f.suffix.lower() in SUB_EXTS:
+                    owner, label = subs_owner(f, its)
+                    lang = sub_language(label) if label is not None else None
+                    if lang and lang != "en":
+                        drops.append(drop(f, {"root": root, "group": group}, f"{lang.capitalize()} subtitles"))
+                        continue
+                    if lang == "en" and owner is not None and f.suffix.lower() in TEXT_SUB_EXTS:
+                        english.setdefault(id(owner), (owner, []))[1].append((f, sub_kind(label)))
+                        continue
                 mine.append(f)
-            if blocked:
-                break
+        # English subtitles from a Subs folder: one plain, one SDH and one forced per video, named after it.
+        for owner, subs in english.values():
+            new_video = Path(owner["new"])
+            for kind in ("", "sdh", "forced"):
+                pick = sorted((f for f, k in subs if k == kind), key=lambda f: f.stat().st_size, reverse=True)
+                for f in pick:
+                    new = new_video.with_name(new_video.stem + ".en" + (f".{kind}" if kind else "") + f.suffix.lower())
+                    if f is pick[0] and str(new) not in taken and not new.exists():
+                        taken.add(str(new))
+                        extras.append({"old": str(f), "new": str(new), "root": str(root), "group": group,
+                                       "note": "English subtitles, named after their video"})
+                    else:
+                        mine.append(f)
+        if stay:
+            continue
         if blocked:
             skips.append((str(gdir), f"other files stay in the old folder: it also holds {blocked.name}, "
                                      "which is not part of this change"))
@@ -2053,6 +2152,32 @@ def plan_extras(items, mode, new_root_suffix, skips, leftovers):
                 continue
             extras.append({"old": str(f), "new": str(new), "root": str(root), "group": group})
     return extras
+
+
+def drop(f, e, why):
+    """A file the plan deletes: an ad from the download, or subtitles in another language."""
+    try:
+        size = f.stat().st_size
+    except OSError:
+        size = None
+    return {"path": str(f), "root": str(e["root"]), "group": e["group"], "size": size, "why": why}
+
+
+def subs_owner(f, its):
+    """For a subtitle file in a movie's or show's folder: (the planned video it belongs to or None, its
+    language label or None). Subs/2_English.srt belongs to the one video beside the Subs folder;
+    Subs/<episode file name>/2_English.srt to that episode."""
+    d = f.parent
+    if d.name.lower() in SUBS_DIRS:
+        beside = [it for it in its if Path(it["old"]).parent == d.parent]
+        return (beside[0] if len(beside) == 1 else None), f.stem
+    if d.parent.name.lower() in SUBS_DIRS:
+        for it in its:
+            v = Path(it["old"])
+            if v.parent == d.parent.parent and d.name in (v.stem, strip_suffix(v.name)):
+                return it, f.stem
+        return None, f.stem
+    return None, None
 
 
 def group_skipped(plan):
@@ -2105,15 +2230,22 @@ def show_plan(plan):
         print(f"\n{len(renumbered)} episode(s) renumbered to match their own titles (see the notes above).")
     extras = plan.get("extras", [])
     if extras:
-        print(f"\nOther files moving with them ({len(extras)}), so the old folders end up empty:")
+        print(f"\nOther files moving with them ({len(extras)}):")
         for x in extras[:200]:
-            print(f"  {os.path.relpath(x['old'], x['root'])}  ->  {os.path.relpath(x['new'], x['root'])}")
+            print(f"  {os.path.relpath(x['old'], x['root'])}  ->  {os.path.relpath(x['new'], x['root'])}"
+                  + (f"  ({x['note']})" if x.get("note") else ""))
         if len(extras) > 200:
             print(f"  ... and {len(extras) - 200} more")
+    deletes = plan.get("deletes", [])
+    if deletes:
+        print(f"\nDownload leftovers deleted ({len(deletes)}; not in the recycle bin, and undo cannot bring them back):")
+        for d in deletes:
+            print(f"  {os.path.relpath(d['path'], d['root'])}  ({d['why']})")
     sc = sum(len(it["sidecars"]) for it in plan["items"])
     verb = {"rename": "rename", "restructure": "move", "newtree": "hard-link into the new tree"}[plan["mode"]]
     print(f"\nWill {verb} {len(plan['items'])} video(s)" + (f", {sc} subtitle/info file(s)" if sc else "")
           + (f" and {len(extras)} other file(s)" if extras else "")
+          + (f"; delete {len(deletes)} download leftover(s)" if deletes else "")
           + f"; {plan['unchanged']} already named right; {len(plan['skipped'])} skipped.")
 
 
@@ -2204,7 +2336,7 @@ def organize(args, state_dir):
             print(f"  {sec.get('title', '?')} [{sec['type']}]: {seen}")
     print(f"Plex knows {len(entries) + len(skipped)} video file(s) in these folders.")
     plan = make_plan(entries, skipped, args.organize, templates, args.paths, args.folders, args.new_root_suffix,
-                     args.two_episode)
+                     args.two_episode, cleanup=not args.keep_leftovers)
     show_plan(plan)
     if not plan["items"]:
         if entries and not plan["skipped"] and not plan["unchanged"]:
@@ -2327,6 +2459,30 @@ def apply_plan(plan_arg, state_dir, yes, env_file=ENV_FILE):
             remove_empty_dirs(old.parent, root)
     if extras_done:
         print(f"  ...and {extras_done} other file(s) {'linked' if link else 'moved'} with them")
+    deleted = 0
+    if not link and plan.get("deletes"):
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with open(state_dir / "deleted.log", "a") as dlog:
+            for d in plan["deletes"]:
+                f = Path(d["path"])
+                if (d["root"], d["group"]) not in groups_done or not f.is_file() or f.suffix.lower() in VIDEO_EXTS:
+                    continue
+                if d.get("size") is not None and f.stat().st_size != d["size"]:
+                    problems.append((d["path"], "changed since the dry run, not deleted"))
+                    continue
+                try:
+                    f.unlink()
+                except OSError as exc:
+                    problems.append((d["path"], f"could not delete: {exc}"))
+                    continue
+                dlog.write(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "file": d["path"],
+                                       "size": d.get("size"), "why": d["why"]}) + "\n")
+                log.setdefault("deleted", []).append(d["path"])
+                deleted += 1
+                remove_empty_dirs(f.parent, Path(d["root"]))
+        if deleted:
+            undo_path.write_text(json.dumps(log, indent=1))
+            print(f"  deleted {deleted} download leftover(s) (ads, other-language subtitles); listed in deleted.log")
     if not link:
         syno_removed = 0
         for c in plan.get("clean_leftovers", []):
@@ -2645,6 +2801,10 @@ def main():
                      help="delete the given video files and their subtitle files (asks first)")
     org.add_argument("--two-episode", choices=("name", "skip"), default="name",
                      help="files holding two or more episodes: name them S01E01-E02 (default) or leave them")
+    org.add_argument("--keep-leftovers", action="store_true",
+                     help="keep download ads (www.YTS....jpg, YTS/YIFY .txt) and other-language subtitles; by "
+                          "default the plan lists them for deleting and names English Subs-folder subtitles "
+                          "after their video")
     org.add_argument("--env-file", default=ENV_FILE, help="where PLEX_URL, PLEX_TOKEN and PLEX_PATH_MAP are kept")
     org.add_argument("--plex-url", help="use this Plex address instead of the one in the env file")
     args = ap.parse_args()

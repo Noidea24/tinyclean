@@ -216,6 +216,16 @@ Files holding two or more episodes are named `Show (Year) - S01E01-E02`, from
 Plex or from the file name (`S01e01-02`, `S01E01E02`, `3x03 & 3x04`), without an
 episode title. `--two-episode skip` leaves them as they are.
 
+Download leftovers: the plan lists the ads release groups leave in their
+folders (`www.YTS.MX.jpg`, `YTSProxies.com.txt`, `YIFYStatus.com.txt`, RARBG
+notes, `.url` files) and subtitles in other languages than English (from their
+names: `French.fre.srt`, `Movie.fr.srt`, `Subs/3_Spanish.srt`) for deleting,
+and gives English subtitles in a `Subs` folder their video's name
+(`Movie (Year).en.srt`, `.en.sdh.srt`, `.en.forced.srt`) so Plex finds them.
+Subtitles whose name is not just a language (`Commentary.srt`) are kept.
+Deleted files are logged in `deleted.log`; undo cannot bring them back.
+`--keep-leftovers` (or unticking the box on the dashboard) keeps them all.
+
 Skipped, with the reason, and grouped by show: files Plex has not matched,
 movies split into several files or with several versions, files whose own
 Clean copy is waiting for `--replace`, and any change that would clash with
@@ -227,7 +237,7 @@ Templates (the defaults follow Plex's naming guide):
 | Option | Default |
 |---|---|
 | `--movie-folder` | `{title} ({year}) {tmdb-{tmdb}}` |
-| `--movie-file` | `{title} ({year})` |
+| `--movie-file` | `{title} ({year}) {edition-{edition}}` |
 | `--show-folder` | `{show} ({year}) {tvdb-{tvdb}}` |
 | `--season-folder` | `Season {season}` |
 | `--episode-file` | `{show} ({year}) - S{season}E{episode} - {episode_title}` |
@@ -235,7 +245,9 @@ Templates (the defaults follow Plex's naming guide):
 Tokens: `title year imdb tmdb tvdb show season episode episode_title resolution edition`.
 Seasons and episodes are two digits; `{episode:3}` gives three. A bracket
 group whose token has no value disappears, so `{title} ({imdb}) {year}` gives
-`Heat (tt0113277) 1995`, or `Heat 1995` when Plex has no IMDb id. Examples:
+`Heat (tt0113277) 1995`, or `Heat 1995` when Plex has no IMDb id. The default
+movie name adds Plex's edition, so a second cut is named
+`World War Z (2013) {edition-Unrated}` and Plex shows both cuts on one title. Examples:
 `--movie-file "{title} ({imdb}) {year}"`, `--movie-file "{title} {year} ({imdb})"`.
 
 After applying, rescan the library in Plex and Refresh in Sonarr/Radarr.

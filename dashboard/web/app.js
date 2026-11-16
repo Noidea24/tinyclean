@@ -4,7 +4,7 @@
 const S = { agents: [], timers: [], profile: "live" };
 const TEMPLATE_DEFAULTS = {
   movie_folder: "{title} ({year}) {tmdb-{tmdb}}",
-  movie_file: "{title} ({year})",
+  movie_file: "{title} ({year}) {edition-{edition}}",
   show_folder: "{show} ({year}) {tvdb-{tvdb}}",
   season_folder: "Season {season}",
   episode_file: "{show} ({year}) - S{season}E{episode} - {episode_title}",
@@ -403,13 +403,15 @@ async function viewOrganize(v) {
   const msg = errorLine();
   const twoEp = h("input", { type: "checkbox", checked: store("two_episode") !== "skip",
     onchange: () => store("two_episode", twoEp.checked ? "name" : "skip") });
+  const cleanup = h("input", { type: "checkbox", checked: store("cleanup") !== "keep",
+    onchange: () => store("cleanup", cleanup.checked ? "delete" : "keep") });
   const go = h("button", { text: "Dry run" });
   go.addEventListener("click", async () => {
     msg.textContent = "";
     if (!picker.value) { msg.textContent = "Pick a folder first."; return; }
     picker.remember();
     const args = { paths: [picker.value], mode: mode.value, folders: +(custom.value || folders.value),
-                   two_episode: twoEp.checked ? "name" : "skip" };
+                   two_episode: twoEp.checked ? "name" : "skip", cleanup: cleanup.checked };
     for (const k of Object.keys(inputs)) if (inputs[k].value.trim()) args[k] = inputs[k].value.trim();
     try { await startJob(worker.value, "organize", args); } catch (e) { msg.textContent = e.message; }
   });
@@ -423,6 +425,8 @@ async function viewOrganize(v) {
     h("div", { class: "muted", style: "margin-top:8px", text: "Preview (example titles):" }), previews.movie, previews.episode,
     h("div", { class: "row" }, h("label", { class: "check" }, twoEp,
       "Name two-episode files from the file name (S01E01-E02); off leaves them as they are")),
+    h("div", { class: "row" }, h("label", { class: "check" }, cleanup,
+      "Delete download ads (www.YTS….jpg, YTS/YIFY .txt) and non-English subtitles, and name English subtitles in Subs folders after their video. Every file is listed in the plan first")),
     h("div", { class: "row" }, go, msg,
       h("span", { class: "muted", text: "Nothing changes until you apply the plan from the job page." }))));
 
@@ -579,6 +583,7 @@ async function afterJob(box, agent, job, lines) {
         (plan.extras || []).length > 0 && h("span", { class: "chip", text: `${plan.extras.length} other file(s) moving along` }),
         renumbered > 0 && h("span", { class: "chip bad", text: `${renumbered} renumbered by title` }),
         leftovers > 0 && h("span", { class: "chip", text: `${leftovers} leftover folder(s) removed` }),
+        (plan.deletes || []).length > 0 && h("span", { class: "chip bad", text: `${plan.deletes.length} download leftover(s) deleted` }),
         h("span", { class: "chip", text: `${plan.unchanged} already right` }),
         h("span", { class: "chip", text: `${plan.skipped.length} skipped` })),
       h("p", { class: "muted", text: "Open the lists below to check them, or download the .txt above." }));
@@ -589,10 +594,13 @@ async function afterJob(box, agent, job, lines) {
         h("button", { class: "danger", text: `Apply ${plan.items.length} change(s)...`, onclick: async () => {
           const verb = { rename: "renamed", restructure: "renamed and moved", newtree: "hard-linked into a new tree" }[plan.mode];
           const more = (plan.extras || []).length;
+          const dels = (plan.deletes || []).length;
           if (!await confirmBox("Apply this plan?", [`${plan.items.length} video(s) will be ${verb}, with their subtitle files` +
             (more ? ` and ${more} other file(s) from their folders.` : "."),
-            "No video is deleted" + (leftovers ? "; only the leftover folders listed are removed." : ".") +
-            " Undo puts the names back."], "apply", "Apply")) return;
+            "No video is deleted" + (leftovers ? "; the leftover folders listed are removed." : ".") +
+            " Undo puts the names back.",
+            ...(dels ? [`${dels} download leftover(s) (ads and non-English subtitles, listed below) are deleted for good: they don't go to the recycle bin and undo can't bring them back.`] : [])],
+            "apply", "Apply")) return;
           try { await startJob(agent, "apply_plan", { plan: name, confirm: true }); } catch (e) { alert(e.message); }
         } })));
     }
@@ -622,11 +630,18 @@ function planTable(plan) {
   if (notes.length) sec.append(fold(`Renumbered by title (${notes.length})`,
     ...notes.map((it) => h("div", { class: "file-line warn", text: `${it.old.split("/").pop()}: ${it.note}` }))));
   const extras = plan.extras || [];
-  if (extras.length) sec.append(fold(`Other files moving with them (${extras.length}), so the old folders end up empty`,
+  if (extras.length) sec.append(fold(`Other files moving with them (${extras.length})`,
     h("div", { class: "tablewrap" }, h("table", {},
       h("tr", {}, h("th", { text: "Now" }), h("th", { text: "Becomes" })),
       ...extras.map((x) => h("tr", {}, h("td", { class: "path", text: rel(x.old, x.root) }),
-        h("td", { class: "path", text: rel(x.new, plan.mode === "newtree" ? x.root.replace(/\/[^/]+$/, "") : x.root) })))))));
+        h("td", { class: "path" }, rel(x.new, plan.mode === "newtree" ? x.root.replace(/\/[^/]+$/, "") : x.root),
+          x.note && h("div", { class: "file-line", text: x.note }))))))));
+  const deletes = plan.deletes || [];
+  if (deletes.length) sec.append(fold(`Download leftovers deleted (${deletes.length})`,
+    h("p", { class: "muted", text: "Ads from the download and subtitles in other languages than English. They don't go to the recycle bin and undo can't bring them back." }),
+    h("div", { class: "tablewrap" }, h("table", {},
+      h("tr", {}, h("th", { text: "File" }), h("th", { text: "Why" })),
+      ...deletes.map((d) => h("tr", {}, h("td", { class: "path", text: rel(d.path, d.root) }), h("td", { text: d.why })))))));
   const leftovers = plan.clean_leftovers || [];
   if (leftovers.length) sec.append(fold(`Leftover folders that will be removed (${leftovers.length})`,
     h("p", { class: "muted", text: "Clean folders holding only tinyclean's own notes (no copies), and Synology @eaDir index folders for the old names (the NAS rebuilds them), so the old folders can go once their videos have moved." }),

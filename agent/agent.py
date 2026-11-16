@@ -208,6 +208,8 @@ def build_argv(kind, a, cfg):
         argv = ["--organize", _choice(a, "mode", ORGANIZE_MODES)] + env
         if a.get("two_episode") not in (None, ""):
             argv += ["--two-episode", _choice(a, "two_episode", ("name", "skip"))]
+        if a.get("cleanup") is False:
+            argv += ["--keep-leftovers"]
         n = _int(a, "folders", 0, 100000)
         if n:
             argv += ["--folders", str(n)]
