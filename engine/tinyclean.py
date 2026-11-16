@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.6"
+VERSION = "8.5.7"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1926,6 +1926,32 @@ def as_multi_episode(values, rng):
     return {**values, "season": season, "episode": f"{first:02d}-E{last:02d}", "episode_title": None}
 
 
+def episode_index(entries):
+    """Plex's titles for every episode number a show has a file at: {(library, show): [(season, ep, title)]}."""
+    index = {}
+    for e in entries:
+        v = e["values"]
+        if e["kind"] == "episode" and not e.get("multi") and not is_placeholder_title(v.get("episode_title")):
+            index.setdefault((e.get("section"), v.get("tvdb") or v.get("show")), []).append(
+                (v.get("season"), v.get("episode"), v.get("episode_title")))
+    return index
+
+
+def title_hit(index, e, mine):
+    """Where Plex has the episode titled ``mine``: (season, episode, title), or None when it is not exactly
+    one place. The file's own season first, then anywhere in the show (seasons ordered differently)."""
+    v = e["values"]
+    show = index.get((e.get("section"), v.get("tvdb") or v.get("show")), [])
+    for pool in ([x for x in show if x[0] == v.get("season")], show):
+        hits = {(s, n): t for s, n, t in pool if titles_same(mine, t)}
+        if len(hits) == 1:
+            (s, n), t = next(iter(hits.items()))
+            return s, n, t
+        if len(hits) > 1:
+            return None
+    return None
+
+
 def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suffix="-new", two_episode="name",
               cleanup=True):
     """Work out every change, skipping clashes and anything outside ``scope``. Returns the plan."""
@@ -1937,13 +1963,7 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
     items, skips, unchanged = [], [(str(f), why) for f, why in skipped if in_scope(f)], 0
     drops = []
 
-    def season_key(e):
-        v = e["values"]
-        return (e.get("section"), v.get("tvdb") or v.get("show"), v.get("season"))
-    seasons = {}
-    for e in entries:
-        if e["kind"] == "episode" and not e.get("multi") and not is_placeholder_title(e["values"].get("episode_title")):
-            seasons.setdefault(season_key(e), []).append((e["values"].get("episode"), e["values"].get("episode_title")))
+    index = episode_index(entries)
 
     for e in sorted(entries, key=lambda e: str(e["file"])):
         note = None
@@ -1971,12 +1991,12 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                 if mine and not titles_agree(mine, plex_title):
                     v = e["values"]
                     code = f"S{int(v.get('season') or 0):02d}E{int(v.get('episode') or 0):02d}"
-                    hits = [(n, t) for n, t in seasons.get(season_key(e), []) if titles_same(mine, t)]
-                    if len(hits) == 1 and hits[0][0] != v.get("episode"):
-                        n, t = hits[0]
+                    hit = title_hit(index, e, mine)
+                    if hit and (hit[0], hit[1]) != (v.get("season"), v.get("episode")):
+                        s, n, t = hit
                         note = (f"renumbered: the file's title \u201c{mine}\u201d is Plex's "
-                                f"S{int(v.get('season') or 0):02d}E{int(n):02d}, not {code} \u201c{plex_title}\u201d")
-                        e = {**e, "values": {**v, "episode": n, "episode_title": t}}
+                                f"S{int(s or 0):02d}E{int(n):02d}, not {code} \u201c{plex_title}\u201d")
+                        e = {**e, "values": {**v, "season": s, "episode": n, "episode_title": t}}
                     else:
                         skips.append((str(f), "the titles in the file names don't match Plex's titles for those "
                                               "episode numbers, so Plex is showing the wrong episodes for them now: "
@@ -2678,12 +2698,7 @@ def audit(args, state_dir, ffprobe_bin=None):
 
     # Shows whose file names give other titles than Plex has for those numbers: Plex shows the wrong
     # episodes for them, and the organizer leaves them alone until the order is fixed.
-    titles = {}
-    for e in entries:
-        v = e["values"]
-        if e["kind"] == "episode" and not e.get("multi") and not is_placeholder_title(v.get("episode_title")):
-            titles.setdefault((e.get("section"), v.get("tvdb") or v.get("show"), v.get("season")), []).append(
-                v.get("episode_title"))
+    index = episode_index(entries)
     order = {}
     for e in entries:
         f, v = e["file"], e["values"]
@@ -2692,8 +2707,7 @@ def audit(args, state_dir, ffprobe_bin=None):
         mine, theirs = title_from_name(f.name), v.get("episode_title")
         if not mine or is_placeholder_title(theirs) or titles_agree(mine, theirs):
             continue
-        season = titles.get((e.get("section"), v.get("tvdb") or v.get("show"), v.get("season")), [])
-        if len([t for t in season if titles_same(mine, t)]) == 1:
+        if title_hit(index, e, mine):
             continue                    # the organizer renumbers this one by itself
         key = folder_of(str(f))
         o = order.setdefault(key, {"folder": key, "title": v.get("show"), "files": 0, "examples": [],

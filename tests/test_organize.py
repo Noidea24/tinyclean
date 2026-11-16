@@ -615,6 +615,17 @@ def test_episodes_numbered_differently_from_plex_are_renumbered_by_title(tc, lib
     assert "don't match Plex's titles" in dict(p["skipped"])[str(special)]
 
 
+def test_titles_found_in_another_season_are_renumbered_there(tc, lib):
+    """Darkwing Duck: the files follow another order, so a title can be in another season in Plex."""
+    f1 = touch(lib["shows"] / "breaking bad" / "S1" / "s01e07 - That Sinking Feeling-noidea.mkv")
+    f2 = touch(lib["shows"] / "breaking bad" / "S2" / "s02e03 - Dirty Money-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 7, "Dirty Money", str(f1)))
+    lib["plex"].episodes.append(episode("10", 2, 3, "That Sinking Feeling", str(f2)))
+    new = {it["old"]: Path(it["new"]).name for it in plan(tc, lib, "rename")["items"]}
+    assert new[str(f1)] == "Breaking Bad (2008) - S02E03 - That Sinking Feeling-noidea.mkv"
+    assert new[str(f2)] == "Breaking Bad (2008) - S01E07 - Dirty Money-noidea.mkv"
+
+
 def test_synology_eadir_folders_are_removed_not_moved(tc, lib, tmp_path):
     ea = lib["heat"].parent / "@eaDir" / "heat.mkv@SynoEAStream"
     touch(ea, b"syno")
