@@ -46,6 +46,11 @@ section, .card { background: var(--panel); border: 1px solid var(--line); border
 .chip.ok { color: var(--accent); border-color: var(--accent); }
 .chip.bad { color: var(--bad); border-color: var(--bad); }
 .chip.off { color: var(--off); }
+.badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--warn);
+  color: var(--panel); font-size: 11.5px; font-weight: 700; text-align: center; line-height: 18px; }
+.dupe { border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin-top: 10px; }
+.dupe .head { margin-bottom: 4px; }
+details summary { cursor: pointer; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--off); display: inline-block; }
 .dot.on { background: var(--accent); }
 .dot.busy { background: var(--warn); }

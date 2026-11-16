@@ -6,13 +6,14 @@
 # Options: --force (update even while a job is running), --no-start (don't start the agent)
 set -euo pipefail
 
-REPO=Noidea24/tinyclean
+REPOS="Noidea24/mediatool Noidea24/tinyclean"   # the second until the repo is renamed
 RUN_AS=${MEDIATOOL_USER:-media}
 PREFIX=/opt/mediatool
 ETC=/etc/mediatool
 ENV_FILE=$ETC/mediatool.env
 UNIT=/etc/systemd/system/mediatool-agent.service
 BIN=/usr/local/bin/tinyclean
+VAR=/var/lib/mediatool
 
 die() { echo "install: $*" >&2; exit 1; }
 
@@ -66,14 +67,22 @@ if [ -n "$FROM" ]; then
   TAG="v${ver:-0}-local"
 else
   if [ -z "$TAG" ]; then
-    TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-          | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])') \
-      || die "could not find the newest release; name one, e.g.: bash install.sh v8.2"
+    for repo in $REPOS; do
+      TAG=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
+            | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null) && break
+    done
+    [ -n "$TAG" ] || die "could not find the newest release; name one, e.g.: bash install.sh v8.4"
   fi
   [[ "$TAG" =~ ^v[0-9][0-9A-Za-z.-]*$ ]] || die "not a release tag: $TAG"
   echo "Downloading $TAG..."
-  curl -fsSL "https://github.com/$REPO/archive/refs/tags/$TAG.tar.gz" -o "$tmp/release.tar.gz" \
-    || die "could not download $TAG"
+  got=0
+  for repo in $REPOS; do
+    if curl -fsSL "https://github.com/$repo/archive/refs/tags/$TAG.tar.gz" -o "$tmp/release.tar.gz" 2>/dev/null; then
+      got=1
+      break
+    fi
+  done
+  [ "$got" = 1 ] || die "could not download $TAG"
   mkdir "$tmp/src"
   tar -xzf "$tmp/release.tar.gz" -C "$tmp/src" --strip-components=1
   src=$tmp/src
@@ -103,16 +112,30 @@ ls -1dt "$PREFIX"/releases/*/ 2>/dev/null | tail -n +4 | while read -r old; do
   [ "$(readlink -f "$old")" = "$(readlink -f "$PREFIX/current")" ] || rm -rf "$old"
 done
 
-# ---- the tinyclean command now runs the installed release
+# ---- the tinyclean and mediatool commands run the installed release
 if [ -f "$BIN" ] && ! grep -q "$PREFIX/current" "$BIN" 2>/dev/null; then
   echo "Replacing the old copy of tinyclean in $BIN with a launcher for $PREFIX/current."
 fi
-cat > "$BIN.new" <<EOF
-#!/bin/sh
-exec $PY $PREFIX/current/engine/tinyclean.py "\$@"
-EOF
-chmod 755 "$BIN.new"
-mv "$BIN.new" "$BIN"
+for cmd in "$BIN" /usr/local/bin/mediatool; do
+  printf '#!/bin/sh\nexec %s %s/current/engine/tinyclean.py "$@"\n' "$PY" "$PREFIX" > "$cmd.new"
+  chmod 755 "$cmd.new"
+  mv "$cmd.new" "$cmd"
+done
+
+# ---- updates from the dashboard: the agent leaves a request file, a root service installs the release
+install -d -m 2770 -o root -g "$GROUP" "$VAR"
+chown root:"$GROUP" "$VAR"
+chmod 2770 "$VAR"
+cp "$dest/deploy/mediatool-update" /usr/local/sbin/mediatool-update.new
+chmod 755 /usr/local/sbin/mediatool-update.new
+mv /usr/local/sbin/mediatool-update.new /usr/local/sbin/mediatool-update
+printf '%s\n' '[Unit]' 'Description=mediatool: install the release the dashboard asked for' '' \
+  '[Service]' 'Type=oneshot' 'ExecStart=/usr/local/sbin/mediatool-update' \
+  > /etc/systemd/system/mediatool-update.service
+printf '%s\n' '[Unit]' 'Description=mediatool: watch for update requests from the dashboard' '' \
+  '[Path]' "PathExists=$VAR/update-request" 'Unit=mediatool-update.service' '' \
+  '[Install]' 'WantedBy=multi-user.target' \
+  > /etc/systemd/system/mediatool-update.path
 
 # ---- the agent service
 cat > "$UNIT" <<EOF
@@ -138,6 +161,7 @@ EOF
 
 if [ "$START" = 1 ] && command -v systemctl >/dev/null; then
   systemctl daemon-reload
+  systemctl enable --quiet --now mediatool-update.path
   systemctl enable --quiet mediatool-agent
   systemctl restart mediatool-agent
   sleep 2
@@ -150,7 +174,8 @@ fi
 ip=$(hostname -I 2>/dev/null | awk '{print $1}')
 echo
 echo "mediatool $TAG installed."
-echo "  tinyclean   -> $PREFIX/current/engine/tinyclean.py"
+echo "  tinyclean, mediatool -> $PREFIX/current/engine/tinyclean.py"
+echo "  updates     -> the Update button on the dashboard (mediatool-update.path)"
 echo "  settings    -> $ENV_FILE (root and group $GROUP only)"
 if [ "$START" = 1 ]; then echo "  agent       -> http://${ip:-<this machine>}:$PORT/ running as $RUN_AS"; fi
 if [ "$NEW_TOKEN" = 1 ]; then echo "  A new agent token was written to $ENV_FILE."; fi

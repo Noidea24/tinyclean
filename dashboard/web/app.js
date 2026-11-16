@@ -116,7 +116,14 @@ function render(template, values) {
 // ------------------------------------------------------------- agents state --
 
 async function loadAgents() {
-  try { S.agents = (await api("/api/agents")).agents; } catch (e) { /* keep the last answer */ }
+  try {
+    const data = await api("/api/agents");
+    S.agents = data.agents; S.dashboard = data.dashboard || {};
+  } catch (e) { /* keep the last answer */ }
+  const audit = (S.agents.find((a) => a.online && a.status.audit) || { status: {} }).status.audit;
+  const n = audit ? Object.entries(audit.counts || {}).filter(([k]) => k !== "other").reduce((s, [, v]) => s + v, 0) : 0;
+  const badge = $("needcount");
+  if (badge) { badge.textContent = n; badge.classList.toggle("hide", !n); }
   return S.agents;
 }
 const online = () => S.agents.filter((a) => a.online);
@@ -246,7 +253,7 @@ function progressBlock(p) {
 function describe(job) {
   const a = job.args || {};
   const where = Array.isArray(a.paths) ? a.paths.map((p) => p.split("/").slice(-2).join("/")).join(", ") : (a.plan || a.log || "");
-  const names = { convert: "Convert", check: "Check", replace: "Replace", rename_suffix: "Give -noidea back",
+  const names = { audit: "Check the library", delete: "Delete", convert: "Convert", check: "Check", replace: "Replace", rename_suffix: "Give -noidea back",
                   status: "Status", organize: "Organize", apply_plan: "Apply plan", undo: "Undo" };
   return (names[job.kind] || job.kind) + (a.mode ? ` (${a.mode})` : "") + (a.dry_run ? " - dry run" : "") + (where ? ": " + where : "");
 }
@@ -394,12 +401,15 @@ async function viewOrganize(v) {
   } }, h("option", { text: "Presets...", value: "" }), ...Object.keys(TEMPLATE_PRESETS).map((n) => h("option", { value: n, text: n })));
   preview();
   const msg = errorLine();
+  const twoEp = h("input", { type: "checkbox", checked: store("two_episode") !== "skip",
+    onchange: () => store("two_episode", twoEp.checked ? "name" : "skip") });
   const go = h("button", { text: "Dry run" });
   go.addEventListener("click", async () => {
     msg.textContent = "";
     if (!picker.value) { msg.textContent = "Pick a folder first."; return; }
     picker.remember();
-    const args = { paths: [picker.value], mode: mode.value, folders: +(custom.value || folders.value) };
+    const args = { paths: [picker.value], mode: mode.value, folders: +(custom.value || folders.value),
+                   two_episode: twoEp.checked ? "name" : "skip" };
     for (const k of Object.keys(inputs)) if (inputs[k].value.trim()) args[k] = inputs[k].value.trim();
     try { await startJob(worker.value, "organize", args); } catch (e) { msg.textContent = e.message; }
   });
@@ -411,6 +421,8 @@ async function viewOrganize(v) {
     h("div", { style: "margin-top:14px" }, h("div", { class: "head" }, h("h2", { text: "Name templates", style: "margin:0" }), presets)),
     h("div", { class: "grid" }, ...Object.keys(inputs).map((k) => h("label", {}, names[k], inputs[k]))),
     h("div", { class: "muted", style: "margin-top:8px", text: "Preview (example titles):" }), previews.movie, previews.episode,
+    h("div", { class: "row" }, h("label", { class: "check" }, twoEp,
+      "Name two-episode files from the file name (S01E01-E02); off leaves them as they are")),
     h("div", { class: "row" }, go, msg,
       h("span", { class: "muted", text: "Nothing changes until you apply the plan from the job page." }))));
 
@@ -512,6 +524,9 @@ async function viewJob(v, agent, id) {
 async function afterJob(box, agent, job, lines) {
   if (job.state !== "finished") return;
   const text = lines.join("\n");
+  if (job.kind === "audit") box.append(h("section", {}, h("a", { href: "#/needs", text: "Open Needs you" })));
+  if (job.kind === "delete") box.append(h("section", {}, h("p", { text: "Rescan the library in Plex, then check the library again from Needs you." }),
+    h("a", { href: "#/needs", text: "Back to Needs you" })));
   if (job.kind === "check") {
     const passed = (text.match(/(\d+) passed the checks/) || [])[1];
     if (!passed || passed === "0") return;
@@ -594,9 +609,137 @@ function planTable(plan) {
   return sec;
 }
 
+// --------------------------------------------------------------- needs you --
+
+function plexLink(audit, key, text) {
+  if (!key || !audit.plex || !audit.plex.machine) return null;
+  const url = `${audit.plex.url}/web/index.html#!/server/${audit.plex.machine}/details?key=${encodeURIComponent("/library/metadata/" + key)}`;
+  return h("a", { href: url, target: "_blank", rel: "noopener", text });
+}
+
+async function viewNeeds(v) {
+  await loadAgents();
+  const w = online().find((a) => a.status.plex);
+  if (!w) { v.append(h("section", { class: "muted", text: "No worker with Plex set up is online." })); return; }
+  let audit = null;
+  try { audit = await agentApi(w.name, "audit"); } catch (e) { if (e.status !== 404) throw e; }
+  const check = h("button", { text: audit ? "Check again" : "Check the library", onclick: async () => {
+    try { await startJob(w.name, "audit", {}); } catch (e) { alert(e.message); }
+  } });
+  v.append(h("section", {}, h("div", { class: "head" }, h("h3", { text: "Needs you" }), h("span", { class: "grow" }), check),
+    h("p", { class: "muted", text: audit ? `Last checked ${when(audit.created)}. It reads Plex and the library and changes nothing; check again after fixing things.`
+      : "Nothing checked yet. It reads Plex and the library (a minute or two) and changes nothing." })));
+  if (!audit) return;
+  const rel = (p) => p.split("/").slice(-2).join("/");
+
+  // Duplicates: keep one, delete the rest (after a typed confirmation that names every file).
+  const dsec = h("section", {}, h("h2", { text: `Duplicates (${audit.duplicates.length})` }));
+  if (!audit.duplicates.length) dsec.append(h("div", { class: "muted", text: "None." }));
+  for (const d of audit.duplicates) {
+    const title = `${d.title || "?"}${d.year ? ` (${d.year})` : ""}${d.episode ? " " + d.episode : ""}`;
+    dsec.append(h("div", { class: "dupe" },
+      h("div", { class: "head" }, h("b", { text: title }), h("span", { class: "grow" }), plexLink(audit, d.plex_key, "Open in Plex")),
+      h("div", { class: "tablewrap" }, h("table", {},
+        ...d.files.map((f) => h("tr", {},
+          h("td", { class: "path", text: rel(f.file) }),
+          h("td", { text: human(f.size) }),
+          h("td", {}, f.converted ? h("span", { class: "chip ok", text: "-noidea" }) : h("span", { class: "chip", text: "not converted" })),
+          h("td", {}, h("button", { class: "plain small", text: "Keep this one", onclick: async () => {
+            const others = d.files.filter((x) => x.file !== f.file);
+            if (!await confirmBox(`Keep one copy of ${title}?`, [
+              `Keeps: ${f.file}`,
+              ...others.map((x) => `Deletes: ${x.file} (${human(x.size)}), with its subtitle files`),
+              "Deleted files do not go to the Synology recycle bin."], "delete", "Delete")) return;
+            try { await startJob(w.name, "delete", { paths: others.map((x) => x.file), confirm: true }); } catch (e) { alert(e.message); }
+          } }))))))));
+  }
+  v.append(dsec);
+
+  const usec = h("section", {}, h("h2", { text: `Not matched in Plex (${audit.unmatched.length})` }),
+    h("p", { class: "muted", text: "Fix Match in Plex (… menu, Fix Match), then check again. Until then these are left as they are." }));
+  if (audit.unmatched.length) usec.append(h("div", { class: "tablewrap" }, h("table", {},
+    ...audit.unmatched.map((u) => h("tr", {}, h("td", { class: "path", text: u.folder.split("/").pop() }),
+      h("td", { text: `${u.files} file(s)` }), h("td", {}, plexLink(audit, u.plex_key, "Fix in Plex") || ""))))));
+  v.append(usec);
+
+  const wsec = h("section", {}, h("h2", { text: `Clean copies waiting (${audit.waiting.length} folders)` }));
+  if (audit.waiting.length) wsec.append(h("div", { class: "tablewrap" }, h("table", {},
+    ...audit.waiting.map((x) => h("tr", {}, h("td", { class: "path", text: rel(x.folder) }), h("td", { text: `${x.files} file(s)` }),
+      h("td", {}, h("button", { class: "plain small", text: "Review", onclick: () => { store("folder.review", x.folder); location.hash = "#/review"; } })))))));
+  else wsec.append(h("div", { class: "muted", text: "None." }));
+  v.append(wsec);
+
+  const fsec = h("section", {}, h("h2", { text: `Failed conversions (${audit.failed.length})` }));
+  if (audit.failed.length) fsec.append(h("div", { class: "tablewrap" }, h("table", {},
+    ...audit.failed.map((r) => h("tr", {}, h("td", { class: "path", text: rel(r.file) }),
+      h("td", { class: r.redownload ? "warn" : "", text: (r.redownload ? "Re-download: " : "") + r.notes }))))),
+    h("div", { class: "row" }, h("a", { href: "#/failures", text: "Retry from Failures" })));
+  else fsec.append(h("div", { class: "muted", text: "None." }));
+  v.append(fsec);
+
+  if (audit.other.length) v.append(h("section", {}, h("h2", { text: `Other (${audit.other.length})` }),
+    h("div", { class: "tablewrap" }, h("table", {},
+      ...audit.other.map((o) => h("tr", {}, h("td", { class: "path" }, h("details", {},
+        h("summary", { text: `${o.folder.split("/").pop()}: ${o.files.length} file(s)` }),
+        ...o.files.map((f) => h("div", { class: "file-line", text: f.split("/").pop() })))),
+        h("td", { text: o.why })))))));
+}
+
+// ---------------------------------------------------------------- settings --
+
+function newerVersion(tag, current) {
+  const nums = (v) => String(v || "").replace(/^v/, "").split(/[.-]/).map((x) => parseInt(x, 10) || 0);
+  const a = nums(tag), b = nums(current);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+  }
+  return false;
+}
+
+async function viewSettings(v) {
+  await loadAgents();
+  const box = h("div", { class: "cards" });
+  v.append(h("section", {}, h("h2", { text: "Workers" }),
+    h("p", { class: "muted", text: "Update installs the newest release on that worker and restarts its agent. It waits while a job is running." })), box);
+  const draw = async () => {
+    box.replaceChildren();
+    for (const a of S.agents) {
+      if (!a.online) { box.append(h("div", { class: "card off" }, h("h3", { text: a.name }), h("div", { class: "muted", text: "off" }))); continue; }
+      let u = {};
+      try { u = await agentApi(a.name, "update"); } catch (e) { u = { error: e.message }; }
+      const s = a.status, last = u.last;
+      const newer = u.latest && newerVersion(u.latest, u.current);
+      const btn = h("button", { text: newer ? `Update to ${u.latest}` : "Reinstall newest", disabled: !!s.job || !u.available || u.pending,
+        onclick: async () => {
+          btn.disabled = true;
+          try { await agentApi(a.name, "update", { tag: "latest" }); btn.textContent = "Updating..."; follow(); }
+          catch (e) { alert(e.message); btn.disabled = false; }
+        } });
+      box.append(h("div", { class: "card" },
+        h("div", { class: "head" }, h("h3", { text: a.name }), h("span", { class: "grow" }),
+          h("span", { class: "chip " + (newer ? "bad" : "ok"), text: `v${u.current || s.version}` + (newer ? ` (newest ${u.latest})` : " (newest)") })),
+        !u.available && h("p", { class: "muted", text: "Updates from here need the installer run once as root on this worker." }),
+        h("div", { class: "row" }, btn, u.pending && h("span", { class: "muted", text: "update requested..." }),
+          s.job && h("span", { class: "muted", text: "a job is running" })),
+        last && h("details", { style: "margin-top:10px" },
+          h("summary", { class: last.state === "failed" ? "error" : "muted", text: `Last update: ${last.state} ${last.tag || ""}, ${when(last.finished)}` }),
+          h("pre", { text: (last.log || []).join("\n") })),
+        h("div", { class: "muted", style: "margin-top:10px", text:
+          `Organizing: ${s.plex ? "Plex set up" : "no Plex"}; ignored libraries: ${(s.plex_ignore || []).join(", ") || "none"}; ` +
+          `Plex rescan after apply: ${s.plex_refresh ? "on" : "off"}; library folders: ${s.roots.join(", ")}` })));
+    }
+  };
+  let t = 0;
+  const follow = () => { t = 0; const tick = async () => { await loadAgents(); await draw(); if (++t < 40) later(tick, 3000); }; later(tick, 3000); };
+  await draw();
+  v.append(h("section", {}, h("h2", { text: "This page" }),
+    h("p", { text: `Dashboard ${S.dashboard && S.dashboard.version ? "v" + S.dashboard.version : ""}. It updates through Komodo: ` +
+      "turn on Auto Update for the mediatool stack, or Pull and Redeploy it after a release." })));
+}
+
 // ------------------------------------------------------------------ routing --
 
-const ROUTES = { overview: viewOverview, convert: viewConvert, review: viewReview, organize: viewOrganize,
+const ROUTES = { needs: viewNeeds, settings: viewSettings, overview: viewOverview, convert: viewConvert, review: viewReview, organize: viewOrganize,
                  failures: viewFailures, history: viewHistory };
 
 async function route() {

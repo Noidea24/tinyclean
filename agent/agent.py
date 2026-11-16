@@ -43,6 +43,10 @@ PROFILES = ("animated", "live")
 ORGANIZE_MODES = ("rename", "restructure", "newtree")
 TEMPLATE_NAMES = ("movie_folder", "movie_file", "show_folder", "season_folder", "episode_file")
 NAME_OK = re.compile(r"^(latest|(plan|undo)-[\w.-]+\.json)$")
+REPOS = ("Noidea24/mediatool", "Noidea24/tinyclean")   # the second until the repo is renamed (GitHub redirects)
+TAG_OK = re.compile(r"^v[0-9][0-9A-Za-z.-]*$")
+VIDEO_EXTS_AGENT = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".mpg", ".mpeg", ".flv",
+                    ".webm", ".divx", ".ogm"}
 
 
 class BadRequest(Exception):
@@ -83,6 +87,9 @@ def load_config(env_file=None):
         "engine": Path(values.get("AGENT_ENGINE") or ENGINE),
         "env_file": env_file,
         "plex": bool(values.get("PLEX_URL") and values.get("PLEX_TOKEN")),
+        "plex_ignore": [t.strip() for t in values.get("PLEX_IGNORE_LIBRARIES", "").split(",") if t.strip()],
+        "plex_refresh": values.get("PLEX_REFRESH", "").strip().lower() in ("1", "yes", "true", "on"),
+        "update_dir": Path(values.get("AGENT_UPDATE_DIR") or "/var/lib/mediatool"),
         "state": Path(values.get("AGENT_STATE") or home / ".mediatool"),
         "engine_state": Path(values.get("AGENT_ENGINE_STATE") or home / ".tinyclean"),
     }
@@ -160,6 +167,10 @@ def build_argv(kind, a, cfg):
     """The engine's options for a job request. Only what is listed here can ever be passed."""
     if not isinstance(a, dict):
         raise BadRequest("args must be an object")
+    if kind not in ("convert", "check", "status", "replace", "rename_suffix", "organize", "apply_plan", "undo",
+                    "audit", "delete"):
+        raise BadRequest("kind must be one of: convert, check, replace, rename_suffix, status, organize, "
+                         "apply_plan, undo, audit, delete")
     plans, undo = cfg["engine_state"] / "plans", cfg["engine_state"] / "undo"
     if kind == "convert":
         argv = ["--profile", _choice(a, "profile", PROFILES), "--jobs", str(_int(a, "jobs", 1, 4, 1)),
@@ -181,10 +192,22 @@ def build_argv(kind, a, cfg):
     if kind in ("replace", "rename_suffix"):
         _confirmed(a, kind.replace("_", " "))
         return ["--" + kind.replace("_", "-"), "--yes", "--"] + _paths(a, cfg["roots"])
+    env = ["--env-file", str(cfg["env_file"])]
+    if kind in ("organize", "audit") and not cfg["plex"]:
+        raise BadRequest(f"Plex is not set up on this worker: add PLEX_URL and PLEX_TOKEN to {cfg['env_file']}")
+    if kind == "audit":
+        return ["--audit"] + env + (["--"] + _paths(a, cfg["roots"]) if a.get("paths") else [])
+    if kind == "delete":
+        _confirmed(a, "deleting files")
+        files = _paths(a, cfg["roots"])
+        for f in files:
+            if not Path(f).is_file() or Path(f).suffix.lower() not in VIDEO_EXTS_AGENT:
+                raise BadRequest(f"{f} is not a video file")
+        return ["--delete", "--yes", "--"] + files
     if kind == "organize":
-        if not cfg["plex"]:
-            raise BadRequest(f"Plex is not set up on this worker: add PLEX_URL and PLEX_TOKEN to {cfg['env_file']}")
-        argv = ["--organize", _choice(a, "mode", ORGANIZE_MODES)]
+        argv = ["--organize", _choice(a, "mode", ORGANIZE_MODES)] + env
+        if a.get("two_episode") not in (None, ""):
+            argv += ["--two-episode", _choice(a, "two_episode", ("name", "skip"))]
         n = _int(a, "folders", 0, 100000)
         if n:
             argv += ["--folders", str(n)]
@@ -198,13 +221,13 @@ def build_argv(kind, a, cfg):
     if kind == "apply_plan":
         _confirmed(a, "applying a plan")
         name = _name(a, "plan")
-        return ["--apply-plan", name if name == "latest" else str(plans / name), "--yes"]
+        return ["--apply-plan", name if name == "latest" else str(plans / name), "--yes"] + env
     if kind == "undo":
         _confirmed(a, "undo")
         name = _name(a, "log")
-        return ["--undo", name if name == "latest" else str(undo / name), "--yes"]
+        return ["--undo", name if name == "latest" else str(undo / name), "--yes"] + env
     raise BadRequest("kind must be one of: convert, check, replace, rename_suffix, status, organize, "
-                     "apply_plan, undo")
+                     "apply_plan, undo, audit, delete")
 
 
 # ---------------------------------------------------------------------- jobs --
@@ -383,8 +406,69 @@ def status(cfg, jobs, started):
             "gpu": os.path.exists("/dev/dri/renderD128"),
             "ffmpeg": "jellyfin" if os.path.exists("/usr/lib/jellyfin-ffmpeg/ffmpeg")
             else ("system" if shutil.which("ffmpeg") else None),
-            "plex": cfg["plex"],
+            "plex": cfg["plex"], "plex_ignore": cfg.get("plex_ignore", []),
+            "plex_refresh": cfg.get("plex_refresh", False),
+            "audit": audit_summary(cfg), "update": update_state(cfg),
             "job": summary(running) if running else None}
+
+
+def audit_summary(cfg):
+    try:
+        a = json.loads((cfg["engine_state"] / "audit.json").read_text())
+        return {"created": a.get("created"), "counts": a.get("counts", {})}
+    except (OSError, ValueError):
+        return None
+
+
+# -------------------------------------------------------------------- update --
+# The agent never installs anything itself: it leaves a request file, and a root service on this
+# machine (mediatool-update, set up by the installer) installs that release from GitHub.
+
+_latest = {"tag": None, "checked": 0, "error": None}
+
+
+def latest_release(force=False):
+    if not force and time.time() - _latest["checked"] < 3600:
+        return _latest
+    import urllib.request
+    _latest.update(checked=time.time(), error=None)
+    for repo in REPOS:
+        try:
+            req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/latest",
+                                         headers={"Accept": "application/vnd.github+json",
+                                                  "User-Agent": "mediatool-agent"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                tag = json.load(r).get("tag_name")
+            if tag and TAG_OK.match(tag):
+                _latest["tag"] = tag
+                return _latest
+        except (OSError, ValueError) as exc:
+            _latest["error"] = str(getattr(exc, "reason", exc))
+    return _latest
+
+
+def update_state(cfg):
+    d = cfg.get("update_dir")
+    if not d:
+        return {"available": False, "pending": False, "last": None}
+    try:
+        result = json.loads((d / "update-result.json").read_text())
+    except (OSError, ValueError):
+        result = None
+    return {"available": d.is_dir(), "pending": (d / "update-request").exists(), "last": result}
+
+
+def request_update(cfg, jobs, tag):
+    if tag not in (None, "", "latest") and not (isinstance(tag, str) and TAG_OK.match(tag)):
+        raise BadRequest("tag must be 'latest' or a release such as v8.4")
+    if jobs.running():
+        raise BadRequest("a job is running: update when it is done")
+    d = cfg.get("update_dir")
+    if not d or not d.is_dir():
+        raise BadRequest("updates from the page are not set up here: run the installer once as root")
+    tmp = d / "update-request.tmp"
+    tmp.write_text((tag or "latest") + "\n")
+    tmp.replace(d / "update-request")
 
 
 def summary(job):
@@ -530,6 +614,13 @@ def make_handler(cfg, jobs, started):
                         return self.send(400, {"error": "bad name"})
                     f = cfg["engine_state"] / parts[1] / parts[2]
                     return self.send(200, f.read_bytes()) if f.is_file() else self.send(404, {"error": "not found"})
+                if parts == ["api", "audit"]:
+                    f = cfg["engine_state"] / "audit.json"
+                    return self.send(200, f.read_bytes()) if f.is_file() else self.send(404, {"error": "no audit yet"})
+                if parts == ["api", "update"]:
+                    lr = latest_release(q.get("check") == "1")
+                    return self.send(200, {"current": engine_version(cfg["engine"]), "latest": lr["tag"],
+                                           "latest_error": lr["error"], **update_state(cfg)})
                 if parts == ["api", "browse"]:
                     try:
                         return self.send(200, browse(cfg, q.get("path")))
@@ -567,6 +658,12 @@ def make_handler(cfg, jobs, started):
                 if busy:
                     return self.send(409, {"error": "a job is already running", "job": summary(busy)})
                 return self.send(201, summary(job))
+            if parts == ["api", "update"]:
+                try:
+                    request_update(cfg, jobs, body.get("tag"))
+                except BadRequest as exc:
+                    return self.send(409 if "running" in str(exc) else 400, {"error": str(exc)})
+                return self.send(202, {"ok": True, "message": "update requested; the agent restarts in a minute"})
             if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "stop":
                 job = jobs.stop(parts[2], after_current=bool(body.get("after_current")))
                 return self.send(200, summary(job)) if job else self.send(404, {"error": "no such job"})

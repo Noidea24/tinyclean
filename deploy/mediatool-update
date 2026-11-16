@@ -1,0 +1,52 @@
+#!/bin/bash
+# Installs the release the dashboard asked for (/var/lib/mediatool/update-request: "latest" or a tag).
+# Run by mediatool-update.path as root. Only GitHub release tags are ever installed.
+set -uo pipefail
+VAR=/var/lib/mediatool
+REPOS="Noidea24/mediatool Noidea24/tinyclean"
+req=$VAR/update-request
+[ -f "$req" ] || exit 0
+want=$(head -c 64 "$req" | tr -d '\r\n ')
+rm -f "$req"
+log=$(mktemp)
+started=$(date +%s)
+write() {  # state, tag
+  python3 -c '
+import json, sys, time
+state, tag, started, log = sys.argv[1:]
+lines = open(log, errors="replace").read().splitlines()[-40:]
+print(json.dumps({"state": state, "tag": tag, "started": int(started), "finished": int(time.time()), "log": lines}))
+' "$1" "$2" "$started" "$log" > "$VAR/update-result.json.tmp"
+  chmod 640 "$VAR/update-result.json.tmp"
+  mv "$VAR/update-result.json.tmp" "$VAR/update-result.json"
+}
+tag=$want
+if [ "$tag" = latest ]; then
+  tag=""
+  for repo in $REPOS; do
+    tag=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
+          | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])' 2>/dev/null) && break
+  done
+fi
+if ! [[ "$tag" =~ ^v[0-9][0-9A-Za-z.-]*$ ]]; then
+  echo "not a release tag: '$want'" >> "$log"
+  write failed "$want"
+  exit 1
+fi
+echo "installing $tag" >> "$log"
+write running "$tag"
+inst=$(mktemp)
+ok=0
+for repo in $REPOS; do
+  if curl -fsSL "https://raw.githubusercontent.com/$repo/$tag/deploy/install.sh" -o "$inst" 2>/dev/null; then
+    ok=1
+    break
+  fi
+done
+[ "$ok" = 1 ] || echo "could not download the installer for $tag from GitHub" >> "$log"
+if [ "$ok" = 1 ] && bash "$inst" "$tag" >> "$log" 2>&1; then
+  write ok "$tag"
+else
+  write failed "$tag"
+fi
+rm -f "$inst" "$log"

@@ -156,7 +156,7 @@ def test_job_options_are_built_from_a_fixed_list(agent_mod, cfg, library):
                     "--", film]
     assert agent_mod.build_argv("check", {"paths": [film]}, cfg) == ["--check", "--", film]
     assert agent_mod.build_argv("apply_plan", {"plan": "latest", "confirm": True}, cfg) == \
-        ["--apply-plan", "latest", "--yes"]
+        ["--apply-plan", "latest", "--yes", "--env-file", cfg["env_file"]]
     assert agent_mod.build_argv("undo", {"log": "undo-20261115-220406.json", "confirm": True}, cfg)[1] == \
         str(cfg["engine_state"] / "undo" / "undo-20261115-220406.json")
 
@@ -272,3 +272,33 @@ def test_browse_stays_inside_the_library(server, library):
     assert film["files"][0]["name"] == "Film.mkv" and film["parent"] == str((library / "Movies").resolve())
     assert call(f"{url}/api/browse?path=/etc")[0] == 400
     assert call(f"{url}/api/browse?path={library}/../..")[0] == 400
+
+
+def test_audit_and_delete_jobs(agent_mod, cfg, library):
+    film = library / "Movies" / "Film (2001)" / "Film.mkv"
+    with pytest.raises(agent_mod.BadRequest, match="Plex is not set up"):
+        agent_mod.build_argv("audit", {}, cfg)
+    plex = {**cfg, "plex": True}
+    assert agent_mod.build_argv("audit", {}, plex) == ["--audit", "--env-file", cfg["env_file"]]
+    assert agent_mod.build_argv("delete", {"paths": [str(film)], "confirm": True}, cfg) == \
+        ["--delete", "--yes", "--", str(film.resolve())]
+    with pytest.raises(agent_mod.BadRequest, match="confirm"):
+        agent_mod.build_argv("delete", {"paths": [str(film)]}, cfg)
+    with pytest.raises(agent_mod.BadRequest, match="not a video"):
+        agent_mod.build_argv("delete", {"paths": [str(film.parent)], "confirm": True}, cfg)
+    assert "--two-episode" in agent_mod.build_argv("organize", {"paths": [str(library)], "mode": "rename",
+                                                                "two_episode": "skip"}, plex)
+
+
+def test_update_is_only_a_request_for_the_root_service(server, tmp_path, monkeypatch, agent_mod):
+    upd = tmp_path / "var-lib-mediatool"
+    url, _ = server(update_dir=upd)
+    code, err = call(f"{url}/api/update", {"tag": "latest"})
+    assert code == 400 and "installer" in err["error"]
+    upd.mkdir()
+    assert call(f"{url}/api/update", {"tag": "v8;rm -rf /"})[0] == 400
+    assert call(f"{url}/api/update", {"tag": "v8.4"})[0] == 202
+    assert (upd / "update-request").read_text() == "v8.4\n"
+    (upd / "update-result.json").write_text('{"state": "ok", "tag": "v8.4"}')
+    _, s = call(f"{url}/api/status")
+    assert s["update"]["pending"] and s["update"]["last"]["state"] == "ok"

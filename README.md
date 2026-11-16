@@ -63,13 +63,18 @@ unreleased work); `bash "$t" v8.2` installs a given one. It:
 
 - puts the release in `/opt/mediatool/releases/<tag>` and points
   `/opt/mediatool/current` at it, keeping the previous two for going back;
-- makes `tinyclean` a launcher for the installed release;
+- makes `tinyclean` and `mediatool` (the same program) launchers for the installed release;
 - creates `/etc/mediatool/mediatool.env` (root and the media group only) and
   adds an `AGENT_TOKEN` to it the first time;
-- installs and starts the `mediatool-agent` service, running as `media`.
+- installs and starts the `mediatool-agent` service, running as `media`;
+- installs `mediatool-update.path`, so the dashboard's **Update** button works.
 
-An update refuses to restart the agent while a job is running (`--force`
-overrides). Going back a release: `bash "$t" v8.1.1`.
+After the first install, update from the dashboard: Settings, **Update**. The
+agent only leaves a request in `/var/lib/mediatool`; a root service on the
+worker (`/usr/local/sbin/mediatool-update`) installs that release from GitHub,
+and only a release tag, never anything else. The result and its log show on
+Settings. An update waits while a job is running (`--force` overrides on the
+command line). Going back a release: `bash "$t" v8.3.2`.
 
 ## Agent
 
@@ -97,6 +102,8 @@ Settings in `/etc/mediatool/mediatool.env`:
 | `AGENT_ROOTS` | /data | folders jobs may touch, comma separated |
 | `AGENT_NAME` | host name | |
 | `PLEX_URL`, `PLEX_TOKEN`, `PLEX_PATH_MAP` | | for organizing, see below |
+| `PLEX_IGNORE_LIBRARIES` | none | Plex library titles to leave out, comma separated |
+| `PLEX_REFRESH` | off | `yes`: after an apply or undo, ask Plex to rescan the changed folders |
 
 After changing it: `systemctl restart mediatool-agent`. Logs:
 `journalctl -u mediatool-agent`.
@@ -136,9 +143,19 @@ One page for both transcoders, at `http://mediatool.lan`: each worker's state
 and live progress, Convert (folder picker, profile, files at once, first N
 folders, dry run), Review (check, then replace with a typed confirmation),
 Organize (mode, templates with presets and a preview, dry run with the plan as
-a table, apply, undo), Failures (latest attempt per file, with Retry), and
-History. It only passes requests on to the agents, and only the ones it
-knows; it never touches media itself.
+a table, apply, undo), Failures (latest attempt per file, with Retry),
+History, **Needs you** and **Settings**. It only passes requests on to the
+agents, and only the ones it knows; it never touches media itself.
+
+**Needs you** checks the library against Plex (`tinyclean --audit`, read only)
+and lists what only a person can sort out: duplicates (one movie or episode in
+several files, each with **Keep this one**, which deletes the others after a
+typed confirmation naming every file), titles not matched in Plex (with a link
+straight to the title in Plex), Clean copies waiting for review, and failed
+conversions. Deleted files are listed in `~/.tinyclean/deleted.log`.
+
+**Settings** shows each worker's version against the newest release, with
+**Update**, the last update's result, and the organizer settings.
 
 It runs as the image `ghcr.io/noidea24/mediatool-dashboard`, built when a
 release is published. Settings (Komodo Environment box, never in a file):
@@ -189,11 +206,21 @@ older than 24 hours, and skips any file that changed since. Each applied run
 writes an undo log in `~/.tinyclean/undo/`. Undoing a `newtree` run only
 removes the new names, never the last copy of a video.
 
-Subtitle and `.nfo` files named after a video move with it. Files ending in
-`-noidea` keep the suffix. Skipped, with the reason: files Plex has not matched,
-movies split into several files or with several versions, files holding
-several episodes, folders with Clean copies waiting for `--replace`, and any
-change that would clash with another file's name.
+Subtitle and `.nfo` files named after a video move with it. With restructure
+and new tree, everything else in a movie's or show's folder (posters, extras,
+`Subs` folders) moves too, so the old folder ends up empty and is removed; a
+leftover `Clean` folder holding only tinyclean's own notes is removed with it.
+Files ending in `-noidea` keep the suffix.
+
+Files holding two or more episodes are named `Show (Year) - S01E01-E02`, from
+Plex or from the file name (`S01e01-02`, `S01E01E02`, `3x03 & 3x04`), without an
+episode title. `--two-episode skip` leaves them as they are.
+
+Skipped, with the reason, and grouped by show: files Plex has not matched,
+movies split into several files or with several versions, files whose own
+Clean copy is waiting for `--replace`, and any change that would clash with
+another file's name. Plans older than a week and undo logs older than 90 days
+are deleted.
 
 Templates (the defaults follow Plex's naming guide):
 

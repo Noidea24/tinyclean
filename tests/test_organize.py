@@ -33,9 +33,15 @@ class FakePlex:
         self.movies_root, self.shows_root = str(movies_root), str(shows_root)
         self.movies, self.shows, self.episodes = list(movies), list(shows), list(episodes)
 
+    sections_extra = ()
+
     def sections(self):
-        return [{"key": "1", "type": "movie", "Location": [{"path": self.movies_root}]},
-                {"key": "2", "type": "show", "Location": [{"path": self.shows_root}]}]
+        return [{"key": "1", "type": "movie", "title": "Movies", "Location": [{"path": self.movies_root}]},
+                {"key": "2", "type": "show", "title": "Shows", "Location": [{"path": self.shows_root}]},
+                *self.sections_extra]
+
+    def get(self, path, **params):
+        return {"machineIdentifier": "machine-1"} if path == "/identity" else {}
 
     def all(self, path, type, includeGuids=0):
         return {1: self.movies, 2: self.shows, 4: self.episodes}[type]
@@ -182,10 +188,12 @@ def test_unmatched_split_and_multi_episode_files_are_skipped(tc, lib):
     double = touch(lib["shows"] / "breaking bad" / "S1" / "bb.s01e03e04.mkv")
     lib["plex"].movies += [movie("Odd", 2000, str(odd), guids=()), movie("Two", 2001, str(two), parts=2)]
     lib["plex"].episodes += [episode("10", 1, 3, "A", str(double)), episode("10", 1, 4, "B", str(double))]
-    why = dict(plan(tc, lib, "rename")["skipped"])
+    p = plan(tc, lib, "rename")
+    why = dict(p["skipped"])
     assert why[str(odd)] == "not matched in Plex"
     assert why[str(two)].startswith("several files")
-    assert why[str(double)] == "file holds several episodes"
+    new = {it["old"]: it["new"] for it in p["items"]}[str(double)]
+    assert new.endswith("/Breaking Bad (2008) - S01E03-E04.mkv")
 
 
 def test_clashes_and_waiting_clean_copies_are_skipped(tc, lib):
@@ -415,13 +423,15 @@ def test_undo_latest_walks_back_one_run_at_a_time(tc, lib, tmp_path):
 
 # ------------------------------------------------- lessons from the real library --
 
-def test_a_two_episode_file_plex_matched_to_one_is_left_alone(tc, lib):
+def test_a_two_episode_file_is_named_from_its_file_name(tc, lib):
     two = touch(lib["shows"] / "breaking bad" / "S1" / "bb - S01e03-04 - A + B-noidea.mkv")
     lib["plex"].episodes.append(episode("10", 1, 3, "Wrong Title", str(two)))
     p = plan(tc, lib, "restructure")
-    why = dict(p["skipped"])[str(two)]
-    assert "several episodes (S01E03-E04)" in why
-    assert str(two) not in {it["old"] for it in p["items"]}
+    new = {it["old"]: it["new"] for it in p["items"]}[str(two)]
+    assert new.endswith("Season 01/Breaking Bad (2008) - S01E03-E04-noidea.mkv"), new
+    entries, skipped = tc.read_library(lib["plex"], lambda x: x)
+    off = tc.make_plan(entries, skipped, "restructure", dict(tc.TEMPLATES), (), two_episode="skip")
+    assert "two-episode naming is off" in dict(off["skipped"])[str(two)]
 
 
 def test_only_files_with_their_own_waiting_copy_are_held_back(tc, lib):
@@ -464,3 +474,94 @@ def test_skipped_files_are_grouped_by_folder_and_reason(tc, lib):
     groups = tc.group_skipped(plan(tc, lib, "rename"))
     odd = [g for g in groups if g[0].endswith("Odd Show")]
     assert len(odd) == 1 and len(odd[0][2]) == 5 and odd[0][1] == "show not matched in Plex"
+
+
+def test_ignored_and_unmounted_libraries_are_left_out(tc, lib, tmp_path):
+    lib["plex"].sections_extra = [{"key": "3", "type": "show", "title": "Youtube Shows",
+                                   "Location": [{"path": str(tmp_path / "not-here")}]}]
+    base = tc.read_library(lib["plex"], lambda x: x)[0]
+    shows_ignored = tc.read_library(lib["plex"], lambda x: x, ignore=["shows"])[0]
+    assert {e["kind"] for e in shows_ignored} == {"movie"} and len(base) > len(shows_ignored)
+
+
+def test_plex_rescan_is_asked_for_the_changed_folders(tc, lib, tmp_path, monkeypatch):
+    asked = []
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: asked.append(req.full_url) or _Closable())
+    settings = {"refresh": True, "url": "http://plex:32400", "token": "t", "pairs": [("/media/NAS", "/data")]}
+    tc.plex_refresh(settings, [("2", "/data/Episodes/Show"), ("2", "/data/Episodes/Show"), (None, "/x")])
+    assert asked == ["http://plex:32400/library/sections/2/refresh?path=%2Fmedia%2FNAS%2FEpisodes%2FShow"]
+    asked.clear()
+    tc.plex_refresh({**settings, "refresh": False}, [("2", "/data/Episodes/Show")])
+    assert asked == []
+
+
+class _Closable:
+    def close(self):
+        pass
+
+
+def test_old_plans_are_trimmed(tc, tmp_path):
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    old, new = plans / "plan-old.json", plans / "plan-new.json"
+    old.write_text("{}")
+    new.write_text("{}")
+    os.utime(old, (time.time() - 8 * 86400,) * 2)
+    tc.trim_state(tmp_path)
+    assert not old.exists() and new.exists()
+
+
+# -------------------------------------------------------------- audit, delete --
+
+def run_audit(tc, lib, tmp_path, monkeypatch, paths=()):
+    import argparse
+    env = tmp_path / "mediatool.env"
+    env.write_text("PLEX_URL=http://plex:32400/\nPLEX_TOKEN=t\n")
+    monkeypatch.setattr(tc, "Plex", lambda url, token: lib["plex"])
+    state = tmp_path / "state"
+    tc.audit(argparse.Namespace(env_file=str(env), plex_url=None, paths=list(paths)), state)
+    return json.loads((state / "audit.json").read_text())
+
+
+def test_audit_lists_duplicates_unmatched_and_waiting_copies(tc, lib, tmp_path, monkeypatch):
+    second = touch(lib["movies"] / "Heat (1995) 720p" / "Heat.720p.mkv", b"smaller")
+    lib["plex"].movies[1]["Media"].append({"videoResolution": "720", "Part": [{"file": str(second)}]})
+    lib["plex"].movies[1]["ratingKey"] = "77"
+    dup_ep = touch(lib["shows"] / "breaking bad" / "S1" / "bb.s01e01.again-noidea.mkv", b"same episode")
+    lib["plex"].episodes.append(episode("10", 1, 1, "Pilot", str(dup_ep)))
+    odd = touch(lib["movies"] / "Odd" / "odd.mkv")
+    lib["plex"].movies.append(movie("Odd", 2000, str(odd), guids=()))
+    touch(lib["ep2"].parent / "Clean" / "bb.s01e02-noidea.mkv", b"copy")
+    a = run_audit(tc, lib, tmp_path, monkeypatch)
+    dups = {(d["title"], d["episode"]): d for d in a["duplicates"]}
+    heat = dups[("Heat", None)]
+    assert heat["plex_key"] == "77" and {f["file"] for f in heat["files"]} == {str(lib["heat"]), str(second)}
+    pilot = dups[("Breaking Bad", "S01E01")]
+    assert sorted(f["converted"] for f in pilot["files"]) == [False, True]
+    assert [u["folder"] for u in a["unmatched"]] == [str(lib["movies"] / "Odd")]
+    assert a["waiting"] == [{"folder": str(lib["ep2"].parent), "files": 1}]
+    assert a["plex"] == {"url": "http://plex:32400", "machine": "machine-1"}
+    assert a["counts"]["duplicates"] == 2
+
+
+def test_audit_reads_failures_from_the_ledger(tc, lib, tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "ledger.csv").write_text(
+        "time,file,result,notes\n"
+        f"2026-11-01 10:00,{lib['heat']},failed,the original looks damaged or incomplete; re-download it\n"
+        f"2026-11-01 10:00,{lib['matrix']},failed,ffmpeg error\n"
+        f"2026-11-02 10:00,{lib['matrix']},done,\n")
+    a = run_audit(tc, lib, tmp_path, monkeypatch)
+    assert [(r["file"], r["redownload"]) for r in a["failed"]] == [(str(lib["heat"]), True)]
+
+
+def test_delete_removes_the_picked_video_and_its_subtitles_only(tc, lib, tmp_path):
+    sub = touch(lib["heat"].with_suffix(".en.srt"), b"srt")
+    keep = touch(lib["heat"].parent / "poster.jpg", b"jpg")
+    tc.delete_files([str(lib["heat"])], tmp_path / "state", yes=True)
+    assert not lib["heat"].exists() and not sub.exists() and keep.exists()
+    log = (tmp_path / "state" / "deleted.log").read_text()
+    assert str(lib["heat"]) in log and str(sub) in log
+    with pytest.raises(SystemExit, match="Not a video"):
+        tc.delete_files([str(keep)], tmp_path / "state", yes=True)

@@ -40,7 +40,7 @@ TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".s
 ALLOWED = [
     ("GET", r"status"), ("GET", r"jobs"), ("GET", r"jobs/[\w-]+"), ("POST", r"jobs"), ("POST", r"jobs/[\w-]+/stop"),
     ("GET", r"plans"), ("GET", r"plans/plan-[\w.-]+\.json"), ("GET", r"undo"), ("GET", r"undo/undo-[\w.-]+\.json"),
-    ("GET", r"ledger"), ("GET", r"browse"),
+    ("GET", r"ledger"), ("GET", r"browse"), ("GET", r"audit"), ("GET", r"update"), ("POST", r"update"),
 ]
 
 
@@ -239,7 +239,8 @@ def make_handler(cfg, throttle):
             if not self.logged_in():
                 return self.send(401, {"error": "log in first"})
             if u.path == "/api/agents":
-                return self.send(200, {"agents": all_status(cfg)})
+                return self.send(200, {"agents": all_status(cfg),
+                                       "dashboard": {"version": os.environ.get("MEDIATOOL_VERSION", "dev")}})
             return self.proxy("GET", u)
 
         def do_POST(self):

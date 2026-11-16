@@ -55,6 +55,15 @@ jobs:
         run: |
           tinyclean --help | grep -q -- --organize
           sudo -u media tinyclean --check /data/Movies
+      - name: Update requests only ever install a release tag
+        run: |
+          systemctl is-enabled mediatool-update.path
+          echo 'v8;touch /tmp/not-a-tag' | sudo -u media tee /var/lib/mediatool/update-request
+          for i in $(seq 1 20); do sudo test -f /var/lib/mediatool/update-result.json && break; sleep 1; done
+          sudo cat /var/lib/mediatool/update-result.json
+          sudo grep -q '"state": "failed"' /var/lib/mediatool/update-result.json
+          test ! -e /tmp/not-a-tag
+          test -x /usr/local/bin/mediatool && mediatool --help | grep -q -- --audit
       - name: Installing again keeps the token
         run: |
           before=$(sudo grep -c AGENT_TOKEN /etc/mediatool/mediatool.env)
