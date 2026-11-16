@@ -339,3 +339,16 @@ def test_command_needs_paths_except_for_apply_and_undo(tmp_path):
     home.mkdir()
     r = run_cli(home=home, check=False)
     assert r.returncode != 0 and "give one or more folders" in r.stderr
+
+
+def test_command_explains_when_plex_sees_other_paths(lib, plex_server, tmp_path):
+    url, _ = plex_server
+    home = tmp_path / "home"
+    home.mkdir()
+    env = tmp_path / "mediatool.env"
+    env.write_text(f"PLEX_URL={url}\nPLEX_TOKEN=secret\n")
+    elsewhere = tmp_path / "Elsewhere"
+    elsewhere.mkdir()
+    out = run_cli(elsewhere, "--organize", "rename", "--env-file", env, home=home).stdout
+    assert f"[movie]: {lib['movies']}" in out and "Plex knows 4 video file(s)" in out
+    assert "None of Plex's files are under" in out and "PLEX_PATH_MAP" in out

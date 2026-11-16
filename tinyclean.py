@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.1"
+VERSION = "8.1.1"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1815,13 +1815,29 @@ def organize(args, state_dir):
                  + f". Known: {', '.join(sorted(TEMPLATE_TOKENS))}.")
     pairs = [tuple(p.split("=", 1)) for p in (env.get("PLEX_PATH_MAP") or "").split(",") if "=" in p]
     print("Reading the library from Plex...")
+    plex, mapped = Plex(url, token), path_mapper(pairs)
     try:
-        entries, skipped = read_library(Plex(url, token), path_mapper(pairs))
+        sections = plex.sections()
+        entries, skipped = read_library(plex, mapped)
     except OSError as exc:
         sys.exit(f"Could not read Plex at {url}: {exc}")
+    if not sections:
+        sys.exit("Plex answered but has no movie or TV libraries.")
+    for sec in sections:
+        for loc in sec.get("Location", []):
+            here = mapped(loc["path"])
+            seen = f"{loc['path']}  (here: {here})" if here != loc["path"] else loc["path"]
+            print(f"  {sec.get('title', '?')} [{sec['type']}]: {seen}"
+                  + ("" if os.path.isdir(here) else "  <- not found on this machine"))
+    print(f"Plex knows {len(entries) + len(skipped)} video file(s) in these folders.")
     plan = make_plan(entries, skipped, args.organize, templates, args.paths, args.folders, args.new_root_suffix)
     show_plan(plan)
     if not plan["items"]:
+        if entries and not plan["skipped"] and not plan["unchanged"]:
+            print(f"\nNone of Plex's files are under {', '.join(args.paths)}.\n"
+                  "If Plex's folders above are not the paths on this machine, add a line like\n"
+                  "  PLEX_PATH_MAP=<Plex's folder>=<same folder here>\n"
+                  f"to {args.env_file} (several pairs separated by commas).")
         print("Nothing to change.")
         return
     plans = state_dir / "plans"
