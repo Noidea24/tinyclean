@@ -599,7 +599,7 @@ def test_episodes_numbered_differently_from_plex_are_renumbered_by_title(tc, lib
     assert new[str(files[17])] == "Breaking Bad (2008) - S02E16 - Terry Ellis-noidea.mkv"
     assert new[str(files[18])] == "Breaking Bad (2008) - S02E17 - Faith Evans-noidea.mkv"
     assert all("renumbered" in it["note"] for it in p["items"] if it["old"] in map(str, files.values()))
-    assert "does not match Plex" in dict(p["skipped"])[str(special)]
+    assert "don't match Plex's titles" in dict(p["skipped"])[str(special)]
 
 
 def test_synology_eadir_folders_are_removed_not_moved(tc, lib, tmp_path):
@@ -625,3 +625,23 @@ def test_artwork_named_after_the_original_download_is_renamed_with_its_video(tc,
     names = sorted(Path(n).name for _, n in it["sidecars"])
     assert names == ["The Matrix (1999)-noidea.en.srt", "The Matrix (1999)-thumb.jpg"]
     assert str(other) not in [o for o, _ in it["sidecars"]]
+
+
+def test_titles_from_real_file_names(tc):
+    assert tc.title_from_name("Atlanta (2016) - S01E01 (1080p AMZN WEB-DL x265 HEVC 10bit)-noidea.mkv") is None
+    assert tc.title_from_name("Sabrina - S01E08 - Steves Bald    -playWEB-noidea.mkv") == "Steves Bald"
+    assert tc.title_from_name("Show.S01E02.The.Big.Bang.1080p.WEB-DL-noidea.mkv") == "The Big Bang"
+    assert tc.titles_agree("Steves Bald", "Steve's Bald")
+    assert tc.titles_agree("Tony! Toni! Ton\u00e9! feat. DJ Quik", "Tony Toni Tone")
+    assert not tc.titles_agree("Chicken's First Kiss", "School Bully")
+    assert tc.multi_episode_name("Show - S08E06 & E07 The Bleakening Part One and Two") == "S08E06-E07"
+
+
+def test_more_release_junk_is_not_a_title(tc):
+    assert tc.title_from_name("CSI - S01E02 - NORDiC ENG-noidea.mkv") is None
+    assert tc.title_from_name("Family Guy S01E03 XviD-AFG-noidea.mkv") is None
+    assert tc.title_from_name("SpongeBob - S01E05 - Gary Takes a Bath - SDTV-noidea.mkv") == "Gary Takes a Bath"
+    assert tc.title_from_name("Superjail - S01E02 - Negaton (1280x720 x264)-noidea.mkv") == "Negaton"
+    assert tc.titles_agree("Redemption Part I", "Redemption (1)")
+    assert tc.titles_agree("The Origin of Donnie, Part Three", "The Origin of Donnie (3)")
+    assert tc.titles_agree("Dirty Pranking Number 2", "Dirty Pranking No. 2")

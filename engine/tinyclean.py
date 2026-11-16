@@ -1782,7 +1782,7 @@ def target_for(entry, mode, templates, new_root_suffix="-new"):
 
 
 MULTI_EPISODE = [
-    re.compile(r"(?i)(?<![a-z0-9])s(\d{1,2})[ ._]*e(\d{1,3})(?:-?e|-|-s\d{1,2}e|[ ._]*&[ ._]*s\d{1,2}e)(\d{1,3})(?!\d)"),
+    re.compile(r"(?i)(?<![a-z0-9])s(\d{1,2})[ ._]*e(\d{1,3})(?:-?e|-|-s\d{1,2}e|[ ._]*&[ ._]*s\d{1,2}e|[ ._]*&[ ._]*e)(\d{1,3})(?!\d)"),
     re.compile(r"(?i)(?<![0-9])(\d{1,2})x(\d{2,3})(?:-|[ ._]*&[ ._]*\d{1,2}x)(\d{2,3})(?!\d)"),
 ]
 
@@ -1820,14 +1820,29 @@ def title_from_name(name):
     if not m:
         return None
     rest = re.sub(r"\[[^\]]*\]", " ", stem[m.end():])
-    rest = re.sub(r"(?i)[ ._-]+(hevc|x26[45]|h\.?26[45]|webdl|web-dl|webrip|bluray|hdtv|\d{3,4}p)\b.*$", "", rest)
-    rest = rest.strip(" .-_")
-    return rest or None
+    rest = re.sub(r"(?i)[ ._(-]*\b(hevc|x26[45]|h\.?26[45]|xvid|divx|web-?dl|web-?rip|web|amzn|nf|hulu|dsnp|hmax|"
+                  r"pcok|bluray|blu-ray|brrip|bdrip|dvdrip|dvd|hdtv|sdtv|remux|remastered|proper|repack|nordic|"
+                  r"r\dj?dvd|\d{3,4}p|\d{3,4}x\d{3,4}|10bit|ddp?\d?)\b.*$", "", rest)
+    rest = re.sub(r"\s+-[A-Za-z0-9]+(-[A-Za-z0-9]+)*$", "", rest)   # a release group after ' -'
+    if rest.count("(") > rest.count(")"):
+        rest += ")"
+    rest = re.sub(r"\s+-\s*[A-Za-z0-9]+$", "", rest) if re.search(r"\s{2,}-\s*\w+$", rest) else rest
+    rest = rest.replace(".", " ") if " " not in rest.strip(" .") else rest
+    rest = re.sub(r"\s+", " ", rest).strip(" .-_()")
+    return rest if re.search(r"[A-Za-z]{2}", rest or "") else None
 
 
 def norm_title(t):
-    t = re.sub(r"(?i)\((incomplete|partial|uncut|extended)\)", " ", str(t or ""))
-    t = re.sub(r"[^a-z0-9 ]+", " ", t.lower())
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(t or "")).encode("ascii", "ignore").decode()
+    t = re.sub(r"(?i)\((incomplete|partial|uncut|extended)\)", " ", t)
+    t = re.sub(r"['\u2019`]", "", t.lower())
+    t = re.sub(r"\s+&\s+", " and ", t)
+    t = re.sub(r"\bpart\s+(one|i|1)\b|\(1\)", " 1 ", t)
+    t = re.sub(r"\bpart\s+(two|ii|2)\b|\(2\)", " 2 ", t)
+    t = re.sub(r"\bpart\s+(three|iii|3)\b|\(3\)", " 3 ", t)
+    t = re.sub(r"\bno\.\s*(\d)", r"number \1", t)
+    t = re.sub(r"[^a-z0-9 ]+", " ", t)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -1907,8 +1922,10 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                                 f"S{int(v.get('season') or 0):02d}E{int(n):02d}, not {code} \u201c{plex_title}\u201d")
                         e = {**e, "values": {**v, "episode": n, "episode_title": t}}
                     else:
-                        skips.append((str(f), f"the file's title \u201c{mine}\u201d does not match Plex's "
-                                              f"\u201c{plex_title}\u201d for {code}: check this episode's match in Plex"))
+                        skips.append((str(f), "the titles in the file names don't match Plex's titles for those "
+                                              "episode numbers, so Plex is showing the wrong episodes for them now: "
+                                              "check the show's episode order in Plex (Edit, Advanced, Episode "
+                                              "ordering) or the file names"))
                         continue
         new = target_for(e, mode, templates, new_root_suffix)
         if new == f:
