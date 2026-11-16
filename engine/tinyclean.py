@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.7"
+VERSION = "8.5.8"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1952,8 +1952,32 @@ def title_hit(index, e, mine):
     return None
 
 
+def builtin_title(ffprobe_bin, path):
+    """The title stored inside a video file (set by whoever made it), or None."""
+    if not ffprobe_bin:
+        return None
+    try:
+        out = subprocess.run([ffprobe_bin, "-v", "error", "-show_entries", "format_tags=title",
+                              "-of", "default=nw=1:nk=1", str(path)], capture_output=True, text=True, timeout=60)
+        return out.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def labels_agree(mine, builtin):
+    """Whether a file's built-in title backs up the title in its name. It may hold two segments
+    ("A / B"), the show's name, codes or a release name; agreeing with any part of it counts."""
+    text = re.sub(r"[._]+", " ", builtin)
+    parts = [text, title_from_name(builtin + ".mkv") or ""]
+    parts += [p for x in list(parts) for p in re.split(r"\s+/\s+|\s+&\s+|:\s+|--+", x)]
+    if any(p.strip() and titles_agree(mine, p.strip()) for p in parts):
+        return True
+    a, b = norm_title(mine), norm_title(text)
+    return len(a) >= 5 and a in b
+
+
 def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suffix="-new", two_episode="name",
-              cleanup=True):
+              cleanup=True, ffprobe_bin=None):
     """Work out every change, skipping clashes and anything outside ``scope``. Returns the plan."""
     scope = [Path(p).resolve() for p in scope]
 
@@ -1964,6 +1988,7 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
     drops = []
 
     index = episode_index(entries)
+    moves = {}                          # file -> the episode number it is renumbered to
 
     for e in sorted(entries, key=lambda e: str(e["file"])):
         note = None
@@ -1992,8 +2017,15 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                     v = e["values"]
                     code = f"S{int(v.get('season') or 0):02d}E{int(v.get('episode') or 0):02d}"
                     hit = title_hit(index, e, mine)
+                    inside = builtin_title(ffprobe_bin, f) if hit else None
+                    if hit and inside and not labels_agree(mine, inside):
+                        skips.append((str(f), f"labels disagree: the file name says \u201c{mine}\u201d but the title "
+                                              f"inside the file says \u201c{inside}\u201d, so it is not renumbered: "
+                                              "play it to see which is right"))
+                        continue
                     if hit and (hit[0], hit[1]) != (v.get("season"), v.get("episode")):
                         s, n, t = hit
+                        moves[str(f)] = (e.get("section"), v.get("tvdb") or v.get("show"), s, n)
                         note = (f"renumbered: the file's title \u201c{mine}\u201d is Plex's "
                                 f"S{int(s or 0):02d}E{int(n):02d}, not {code} \u201c{plex_title}\u201d")
                         e = {**e, "values": {**v, "season": s, "episode": n, "episode_title": t}}
@@ -2019,6 +2051,25 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
         items.append({"old": str(f), "new": str(new), "root": str(e["root"]), "group": e["group"],
                       "section": e.get("section"), "note": note,
                       "size": st.st_size, "mtime": st.st_mtime_ns, "sidecars": sides})
+    # A renumbered file must not land on an episode another file keeps: that would make a new duplicate.
+    if moves:
+        held = {}
+        for e in entries:
+            if e["kind"] != "episode":
+                continue
+            v, f = e["values"], str(e["file"])
+            show = (e.get("section"), v.get("tvdb") or v.get("show"))
+            rng = e.get("multi") or multi_episode_range(e["file"].name)
+            nums = [moves[f][2:]] if f in moves else (
+                [(rng[0], n) for n in range(rng[1], rng[2] + 1)] if rng else [(v.get("season"), v.get("episode"))])
+            for s, n in nums:
+                held.setdefault((*show, s, n), []).append(f)
+        clash = {f for f, num in moves.items() if len(held.get(num, [])) > 1}
+        for it in [it for it in items if it["old"] in clash]:
+            s, n = moves[it["old"]][2:]
+            skips.append((it["old"], f"not renumbered: another file already holds S{int(s or 0):02d}E{int(n):02d}, "
+                                     "and two files on one episode would be a new duplicate"))
+        items = [it for it in items if it["old"] not in clash]
     # Two changes aiming at one name, or a name already in use by another file: leave both alone.
     targets = {}
     for it in items:
@@ -2317,7 +2368,7 @@ def trim_state(state_dir):
                 pass
 
 
-def organize(args, state_dir):
+def organize(args, state_dir, ffprobe_bin=None):
     settings = plex_settings(args.env_file, args.plex_url)
     url, token = settings["url"], settings["token"]
     if not url or not token:
@@ -2356,7 +2407,7 @@ def organize(args, state_dir):
             print(f"  {sec.get('title', '?')} [{sec['type']}]: {seen}")
     print(f"Plex knows {len(entries) + len(skipped)} video file(s) in these folders.")
     plan = make_plan(entries, skipped, args.organize, templates, args.paths, args.folders, args.new_root_suffix,
-                     args.two_episode, cleanup=not args.keep_leftovers)
+                     args.two_episode, cleanup=not args.keep_leftovers, ffprobe_bin=ffprobe_bin)
     show_plan(plan)
     if not plan["items"]:
         if entries and not plan["skipped"] and not plan["unchanged"]:
@@ -2885,7 +2936,7 @@ def main():
         elif args.apply_plan:
             apply_plan(args.apply_plan, org_state, args.yes, args.env_file)
         else:
-            organize(args, org_state)
+            organize(args, org_state, cfg["ffprobe"])
         return
     if args.rename_suffix:
         rename_suffix(args.paths, cfg, args.yes)

@@ -626,6 +626,29 @@ def test_titles_found_in_another_season_are_renumbered_there(tc, lib):
     assert new[str(f2)] == "Breaking Bad (2008) - S01E07 - Dirty Money-noidea.mkv"
 
 
+def test_a_file_whose_inside_title_disagrees_is_not_renumbered(tc, lib, monkeypatch):
+    """Recess: the name said Dodgeball City, the title inside the file said The Shiner / Stand Up Randall."""
+    f1 = touch(lib["shows"] / "breaking bad" / "S1" / "s01e07 - That Sinking Feeling-noidea.mkv")
+    f2 = touch(lib["shows"] / "breaking bad" / "S2" / "s02e03 - Dirty Money-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 7, "Dirty Money", str(f1)))
+    lib["plex"].episodes.append(episode("10", 2, 3, "That Sinking Feeling", str(f2)))
+    inside = {str(f1): "Show S04E01 - The Shiner / Stand Up Randall", str(f2): "Show.S01E07.Dirty.Money.720p-GRP"}
+    monkeypatch.setattr(tc, "builtin_title", lambda b, p: inside.get(str(p)))
+    entries, skipped = tc.read_library(lib["plex"], lambda p: p)
+    p = tc.make_plan(entries, skipped, "rename", dict(tc.TEMPLATES), (), ffprobe_bin="ffprobe")
+    assert "labels disagree" in dict(p["skipped"])[str(f1)]
+    # f2's inside title agrees with its name, but its target S01E07 stays held by f1, so no new duplicate
+    assert "would be a new duplicate" in dict(p["skipped"])[str(f2)]
+    assert not [it for it in p["items"] if it["old"] in (str(f1), str(f2))]
+
+
+def test_built_in_titles_that_agree_let_the_renumbering_through(tc):
+    assert tc.labels_agree("Downtown Dashin'", "Real Stories of The Highway Patrol--Season 1, Episode 6: Downtown Dashin'")
+    assert tc.labels_agree("Stand Up Randall", "Recess S03E03E04 - The Shiner / Stand Up Randall")
+    assert tc.labels_agree("That Sinking Feeling", "Show.S01E07.That.Sinking.Feeling.720p.WEB-DL")
+    assert not tc.labels_agree("Dodgeball City", "Recess S03E03E04 - The Shiner / Stand Up Randall")
+
+
 def test_synology_eadir_folders_are_removed_not_moved(tc, lib, tmp_path):
     ea = lib["heat"].parent / "@eaDir" / "heat.mkv@SynoEAStream"
     touch(ea, b"syno")
