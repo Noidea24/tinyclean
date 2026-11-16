@@ -25,6 +25,12 @@ def test_4k_is_scaled_to_1080p(tc, cfg, tmp_path):
     assert p["video_mode"] == "encode" and p["needs_scale"] and (p["out_w"], p["out_h"]) == (1920, 1080)
 
 
+def test_padded_1080p_keeps_its_size(tc, cfg, tmp_path):
+    """No Game No Life specials: 1920x1088 is 1080p padded to 16-pixel blocks; never squeeze it."""
+    p = plan(tc, cfg, make_video(tmp_path / "pad.mkv", size="1920x1088", seconds=1, audio=False))
+    assert not p["needs_scale"] and (p["out_w"], p["out_h"]) == (1920, 1088)
+
+
 def test_surround_is_downmixed_to_stereo(tc, cfg, tmp_path):
     p = plan(tc, cfg, make_video(tmp_path / "d.mkv", channels=6))
     assert [a["mode"] for a in p["audio"]] == ["downmix"]

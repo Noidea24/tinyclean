@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.9"
+VERSION = "8.5.10"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -446,7 +446,10 @@ def plan_file(path, info, cfg):
     # can show it right; re-encoding gives a green/purple picture. Never touch it.
     dv_only = dovi is not None and (dovi[1] == 0 or (dovi[0] == 5 and dovi[1] < 0))
     ten_bit = "10" in v.get("pix_fmt", "") or "12" in v.get("pix_fmt", "") or hdr
-    needs_scale = h > cfg["max_height"] or w > cfg["max_width"]
+    # 1080p is often stored as 1920x1088 (padded to whole 16-pixel blocks): that is 1080p, not bigger,
+    # and scaling it would squeeze the picture to 1906x1080.
+    padded_1080 = w <= cfg["max_width"] and h <= cfg["max_height"] + 8
+    needs_scale = (h > cfg["max_height"] or w > cfg["max_width"]) and not padded_1080
     if needs_scale:
         f = min(cfg["max_width"] / w, cfg["max_height"] / h)
         out_w, out_h = int(round(w * f / 2)) * 2, int(round(h * f / 2)) * 2
