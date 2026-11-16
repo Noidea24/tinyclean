@@ -568,9 +568,29 @@ function planTable(plan) {
       h("tr", {}, h("th", { text: "Now" }), h("th", { text: "Becomes" })),
       ...extras.map((x) => h("tr", {}, h("td", { class: "path", text: rel(x.old, x.root) }),
         h("td", { class: "path", text: rel(x.new, plan.mode === "newtree" ? x.root.replace(/\/[^/]+$/, "") : x.root) }))))));
-  if (plan.skipped.length) sec.append(h("h2", { text: "Skipped", style: "margin-top:16px" }), h("div", { class: "tablewrap" }, h("table", {},
-    h("tr", {}, h("th", { text: "File" }), h("th", { text: "Why" })),
-    ...plan.skipped.map(([p, why]) => h("tr", {}, h("td", { class: "path", text: p }), h("td", { text: why }))))));
+  const leftovers = plan.clean_leftovers || [];
+  if (leftovers.length) sec.append(h("h2", { text: "Leftover Clean folders that will be removed", style: "margin-top:16px" }),
+    h("p", { class: "muted", text: "These hold only tinyclean's own notes (no copies), so the old folder can go once its videos have moved." }),
+    ...leftovers.map((c) => h("div", { class: "file-line", text: c.dir })));
+  if (plan.skipped.length) {
+    const roots = (plan.roots || []).slice().sort((a, b) => b.length - a.length);
+    const groups = new Map();
+    for (const [path, why] of plan.skipped) {
+      const root = roots.find((r) => path.startsWith(r.replace(/\/$/, "") + "/"));
+      const folder = root ? path.slice(0, root.length + 1 + path.slice(root.length + 1).split("/")[0].length) : path.replace(/\/[^/]+$/, "");
+      const personal = /^(another file|name already|other files stay|stays in|the file name)/.test(why);
+      const key = folder + "\u0000" + why + "\u0000" + (personal ? path : "");
+      if (!groups.has(key)) groups.set(key, { folder, why, paths: [] });
+      groups.get(key).paths.push(path);
+    }
+    sec.append(h("h2", { text: `Skipped (${plan.skipped.length})`, style: "margin-top:16px" }), h("div", { class: "tablewrap" }, h("table", {},
+      h("tr", {}, h("th", { text: "What" }), h("th", { text: "Why" })),
+      ...[...groups.values()].map((g) => h("tr", {},
+        h("td", { class: "path" }, g.paths.length === 1 ? g.paths[0] : h("details", {},
+          h("summary", { text: `${g.folder.split("/").pop()}: ${g.paths.length} files` }),
+          ...g.paths.map((p) => h("div", { class: "file-line", text: p.split("/").pop() })))),
+        h("td", { text: g.why }))))));
+  }
   return sec;
 }
 

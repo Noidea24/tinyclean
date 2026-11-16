@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.3.1"
+VERSION = "8.3.2"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1737,6 +1737,23 @@ def target_for(entry, mode, templates, new_root_suffix="-new"):
     return root / render(templates["show_folder"], v) / render(templates["season_folder"], v) / name
 
 
+MULTI_EPISODE = [
+    re.compile(r"(?i)(?<![a-z0-9])s(\d{1,2})[ ._]*e(\d{1,3})(?:-?e|-|-s\d{1,2}e|[ ._]*&[ ._]*s\d{1,2}e)(\d{1,3})(?!\d)"),
+    re.compile(r"(?i)(?<![0-9])(\d{1,2})x(\d{2,3})(?:-|[ ._]*&[ ._]*\d{1,2}x)(\d{2,3})(?!\d)"),
+]
+
+
+def multi_episode_name(name):
+    """'S01E01-02', 'S01E01E02', 'S01E01-E02', '3x03 & 3x04' -> 'S01E01-E02'. None for one episode."""
+    for rx in MULTI_EPISODE:
+        m = rx.search(name)
+        if m:
+            season, first, last = (int(g) for g in m.groups())
+            if first < last <= first + 10:
+                return f"S{season:02d}E{first:02d}-E{last:02d}"
+    return None
+
+
 def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suffix="-new"):
     """Work out every change, skipping clashes and anything outside ``scope``. Returns the plan."""
     scope = [Path(p).resolve() for p in scope]
@@ -1752,8 +1769,13 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
         if not f.exists():
             skips.append((str(f), "not found here (check PLEX_PATH_MAP)"))
             continue
-        if (f.parent / CLEAN_DIR).is_dir():
-            skips.append((str(f), "a Clean copy is waiting in this folder: run --replace first"))
+        if has_clean_copy(f):
+            skips.append((str(f), "its Clean copy is waiting: run --replace first"))
+            continue
+        many = multi_episode_name(f.name)
+        if many and e["kind"] == "episode":
+            skips.append((str(f), f"the file name says it holds several episodes ({many}), but Plex matched "
+                                  "it to one, so Plex's title would be wrong: left as it is"))
             continue
         new = target_for(e, mode, templates, new_root_suffix)
         if new == f:
@@ -1780,13 +1802,23 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
     if folders:
         groups = list(dict.fromkeys((it["root"], it["group"]) for it in kept))[:folders]
         kept = [it for it in kept if (it["root"], it["group"]) in groups]
-    extras = [] if mode == "rename" else plan_extras(kept, mode, new_root_suffix, skips)
+    leftovers = []
+    extras = [] if mode == "rename" else plan_extras(kept, mode, new_root_suffix, skips, leftovers)
     return {"version": 1, "created": time.time(), "mode": mode, "templates": templates,
-            "new_root_suffix": new_root_suffix,
-            "items": kept, "extras": extras, "skipped": sorted(skips), "unchanged": unchanged}
+            "new_root_suffix": new_root_suffix, "roots": sorted({str(e["root"]) for e in entries}),
+            "items": kept, "extras": extras, "clean_leftovers": leftovers,
+            "skipped": sorted(skips), "unchanged": unchanged}
 
 
-def plan_extras(items, mode, new_root_suffix, skips):
+def only_own_files(clean):
+    """A Clean folder holding nothing but tinyclean's own bookkeeping files (no copies)."""
+    try:
+        return all(e.is_file() and e.name in CLEAN_OWN_FILES for e in clean.iterdir())
+    except OSError:
+        return False
+
+
+def plan_extras(items, mode, new_root_suffix, skips, leftovers):
     """Everything else in a movie's or show's old folder (posters, .nfo files, extras, subtitle folders)
     goes along with its videos, so the old folder ends up empty and is removed. Only when that folder
     belongs to this one movie or show alone: a movie folder with another movie directly in it, or a show
@@ -1829,16 +1861,41 @@ def plan_extras(items, mode, new_root_suffix, skips):
             skips.append((str(gdir), f"other files stay in the old folder: it also holds {blocked.name}, "
                                      "which is not part of this change"))
             continue
-        if any((Path(dirpath) / CLEAN_DIR).is_dir() for dirpath, _, _ in os.walk(gdir)):
-            continue
+        cleans = [Path(dirpath) / CLEAN_DIR for dirpath, _, _ in os.walk(gdir) if (Path(dirpath) / CLEAN_DIR).is_dir()]
+        if any(not only_own_files(c) for c in cleans):
+            continue                    # Clean copies still waiting somewhere in it: leave the rest alone
+        leftovers += [{"dir": str(c), "root": str(root), "group": group} for c in cleans]
         for f in mine:
-            moved_to = parents.get(str(f.parent), set())
-            new = (Path(next(iter(moved_to))) / f.name) if len(moved_to) == 1 else top / f.relative_to(gdir)
+            # Follow the nearest folder whose videos all went to one place: Season 1/Subs/x.srt -> Season 01/Subs/x.srt
+            d, new = f.parent, None
+            while True:
+                dest = parents.get(str(d), set())
+                if len(dest) == 1:
+                    new = Path(next(iter(dest))) / f.relative_to(d)
+                    break
+                if d == gdir:
+                    break
+                d = d.parent
+            new = new or top / f.relative_to(gdir)
             if new.exists():
                 skips.append((str(f), f"stays in the old folder: name already in use: {new}"))
                 continue
             extras.append({"old": str(f), "new": str(new), "root": str(root), "group": group})
     return extras
+
+
+def group_skipped(plan):
+    """Skipped files with the same reason in the same show or movie folder, as one line each:
+    [(folder, reason, [paths])]. Reasons naming another file stay one line per file."""
+    roots = sorted(plan.get("roots", []), key=len, reverse=True)
+    groups = {}
+    for path, why in plan["skipped"]:
+        root = next((r for r in roots if path.startswith(r.rstrip("/") + "/")), None)
+        folder = str(Path(root) / Path(path).relative_to(root).parts[0]) if root else str(Path(path).parent)
+        personal = why.startswith(("another file", "name already", "other files stay", "stays in", "the file name"))
+        key = (folder, why, path if personal else None)
+        groups.setdefault(key, []).append(path)
+    return [(folder, why, paths) for (folder, why, _), paths in groups.items()]
 
 
 def show_plan(plan):
@@ -1855,8 +1912,13 @@ def show_plan(plan):
                 print(f"       + {Path(s_old).name}  ->  {Path(s_new).name}")
     if plan["skipped"]:
         print(f"\nSkipped ({len(plan['skipped'])}):")
-        for path, why in plan["skipped"]:
-            print(f"  {path}\n    {why}")
+        for folder, why, paths in group_skipped(plan):
+            if len(paths) == 1:
+                print(f"  {paths[0]}\n    {why}")
+            else:
+                print(f"  {folder}: {len(paths)} files\n    {why}")
+    for c in plan.get("clean_leftovers", []):
+        print(f"\nLeftover Clean folder, holding only tinyclean's own notes (no copies), will be removed: {c['dir']}")
     extras = plan.get("extras", [])
     if extras:
         print(f"\nOther files moving with them ({len(extras)}), so the old folders end up empty:")
@@ -2023,6 +2085,11 @@ def apply_plan(plan_arg, state_dir, yes):
             remove_empty_dirs(old.parent, root)
     if extras_done:
         print(f"  ...and {extras_done} other file(s) {'linked' if link else 'moved'} with them")
+    if not link:
+        for c in plan.get("clean_leftovers", []):
+            if (c["root"], c["group"]) in groups_done and remove_empty_clean(Path(c["dir"])):
+                print(f"  removed the leftover Clean folder {c['dir']} (it held only tinyclean's own notes)")
+                remove_empty_dirs(Path(c["dir"]).parent, Path(c["root"]))
     for p, why in problems:
         print(f"  [skip] {p}: {why}")
     print(f"\n{done} of {len(plan['items'])} video(s) {'linked' if link else 'moved'}. "

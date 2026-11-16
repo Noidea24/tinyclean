@@ -190,7 +190,7 @@ def test_unmatched_split_and_multi_episode_files_are_skipped(tc, lib):
 
 def test_clashes_and_waiting_clean_copies_are_skipped(tc, lib):
     touch(lib["heat"].with_name("Heat (1995).mkv"), b"another file")
-    (lib["ep1"].parent / "Clean").mkdir()
+    touch(lib["ep1"].parent / "Clean" / "bb.s01e01-noidea.mkv", b"copy")
     why = dict(plan(tc, lib, "rename")["skipped"])
     assert why[str(lib["heat"])].startswith("name already in use")
     assert "run --replace first" in why[str(lib["ep1"])]
@@ -411,3 +411,56 @@ def test_undo_latest_walks_back_one_run_at_a_time(tc, lib, tmp_path):
     assert tree(tmp_path / "Movies") == before
     with pytest.raises(SystemExit, match="No undo log"):
         tc.undo_run("latest", state, yes=True)
+
+
+# ------------------------------------------------- lessons from the real library --
+
+def test_a_two_episode_file_plex_matched_to_one_is_left_alone(tc, lib):
+    two = touch(lib["shows"] / "breaking bad" / "S1" / "bb - S01e03-04 - A + B-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 3, "Wrong Title", str(two)))
+    p = plan(tc, lib, "restructure")
+    why = dict(p["skipped"])[str(two)]
+    assert "several episodes (S01E03-E04)" in why
+    assert str(two) not in {it["old"] for it in p["items"]}
+
+
+def test_only_files_with_their_own_waiting_copy_are_held_back(tc, lib):
+    clean = lib["ep1"].parent / "Clean"
+    touch(clean / "bb.s01e01-noidea.mkv", b"copy")
+    why = dict(plan(tc, lib, "rename")["skipped"])
+    assert "Clean copy is waiting" in why[str(lib["ep1"])]
+    assert str(lib["ep2"]) not in why
+
+
+def test_a_leftover_clean_folder_with_only_notes_goes_and_frees_the_old_folder(tc, lib, tmp_path):
+    clean = lib["heat"].parent / "Clean"
+    touch(clean / ".tinyclean-map.json", b"{}")
+    touch(clean / "README-tinyclean.txt", b"notes")
+    state = tmp_path / "state"
+    p = plan(tc, lib, "restructure")
+    assert [c["dir"] for c in p["clean_leftovers"]] == [str(clean)]
+    tc.apply_plan(str(save(tc, state, p)), state, yes=True)
+    assert not lib["heat"].parent.exists()
+
+
+def test_a_clean_folder_holding_a_copy_keeps_the_old_folder_and_its_extras(tc, lib):
+    touch(lib["heat"].parent / "poster.jpg", b"jpg")
+    touch(lib["heat"].parent / "Clean" / "other-noidea.mkv", b"a copy of something else")
+    p = plan(tc, lib, "restructure")
+    assert not [x for x in p["extras"] if "Heat" in x["old"]] and not p["clean_leftovers"]
+
+
+def test_subtitle_folders_follow_their_season(tc, lib):
+    sub = touch(lib["shows"] / "breaking bad" / "S1" / "Subs" / "ep1" / "2_English.srt", b"srt")
+    p = plan(tc, lib, "restructure")
+    new = {x["old"]: x["new"] for x in p["extras"]}[str(sub)]
+    assert new.endswith("Breaking Bad (2008) {tvdb-81189}/Season 01/Subs/ep1/2_English.srt")
+
+
+def test_skipped_files_are_grouped_by_folder_and_reason(tc, lib):
+    for n in range(3, 8):
+        f = touch(lib["shows"] / "Odd Show" / f"odd {n}.mkv")
+        lib["plex"].episodes.append(episode("99", 1, n, "x", str(f)))
+    groups = tc.group_skipped(plan(tc, lib, "rename"))
+    odd = [g for g in groups if g[0].endswith("Odd Show")]
+    assert len(odd) == 1 and len(odd[0][2]) == 5 and odd[0][1] == "show not matched in Plex"
