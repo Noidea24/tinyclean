@@ -62,11 +62,12 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.1.1"
+VERSION = "8.2"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
 TAG = "TINYCLEAN"                   # hidden tag inside every file tinyclean makes
+PROGRESS_PREFIX = "@progress "      # --progress-lines: start of each JSON progress line
 
 
 def done_suffix(stem):
@@ -1978,7 +1979,7 @@ def undo_run(undo_arg, state_dir, yes):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Shrink and normalize video files (see header for rules).")
+    ap = argparse.ArgumentParser(prog="tinyclean", description="Shrink and normalize video files (see header for rules).")
     ap.add_argument("paths", nargs="*", help="folders or files to process")
     ap.add_argument("--dry-run", action="store_true", help="show the plan for each file, change nothing")
     ap.add_argument("--sample", type=int, metavar="N", help="encode a 60 s clip of the N largest files and report projected savings")
@@ -2016,6 +2017,9 @@ def main():
                          f"{SUFFIX} back to tinyclean files that lost it, e.g. renamed by Sonarr/Radarr (asks first)")
     ap.add_argument("--check", action="store_true",
                     help="compare originals with their Clean copies and report; changes nothing")
+    ap.add_argument("--progress-lines", action="store_true",
+                    help=f"print the run's progress as JSON lines starting with '{PROGRESS_PREFIX.strip()}' "
+                         "(used by the mediatool agent)")
     ap.add_argument("--status", action="store_true",
                     help=f"rewrite {STATUS_NAME} at the top of the library and print it")
     org = ap.add_argument_group("organize (names and folders from Plex's matches; always a dry run first)")
@@ -2026,7 +2030,7 @@ def main():
     org.add_argument("--apply-plan", metavar="PLAN", help="carry out a saved plan ('latest' for the newest)")
     org.add_argument("--undo", metavar="LOG", help="put back an applied plan ('latest' for the newest)")
     org.add_argument("--folders", type=int, default=0, metavar="N",
-                     help="only plan the first N movie or show folders (0 = all)")
+                     help="only the first N movie or show folders, by name (0 = all); also limits a conversion run")
     org.add_argument("--new-root-suffix", default="-new", metavar="TEXT",
                      help="with newtree: name the new tree <library><TEXT> (default %(default)s)")
     for name, default in TEMPLATES.items():
@@ -2129,6 +2133,11 @@ def main():
                      f"Replace some originals or clear space first.")
     if in_progress:
         files = [(p, sz) for p, sz in files if p not in in_progress]
+    if args.folders and not args.sample:
+        first = sorted(dict.fromkeys(show_key(p, args.paths) for p, _ in files),
+                       key=lambda k: Path(k).name.lower())[:args.folders]
+        files = [(p, sz) for p, sz in files if show_key(p, args.paths) in first]
+        print(f"Only the first {len(first)} show/movie folder(s) this run.")
     if args.sample:
         files = files[:args.sample]
     elif args.limit:
@@ -2219,10 +2228,32 @@ def main():
     prompting = threading.Event()
     multi = jobs > 1
 
+    def progress_record():
+        """The run's progress as one line of JSON, for the mediatool agent."""
+        with lock:
+            active = []
+            for slot in sorted(inflight):
+                t = slot_text.get(slot, "")
+                m = re.search(r"([\d.]+)%.*?speed (\S+).*?ETA (\S+)", t)
+                active.append({"file": str(inflight[slot][0]), "bytes": inflight[slot][1],
+                               "pct": float(m.group(1)) if m else 0.0,
+                               "speed": m.group(2) if m else "", "eta": m.group(3) if m else ""})
+            elapsed = time.time() - run_start
+            done_b = totals["done_bytes"]
+            eta = elapsed / done_b * (total_bytes - done_b) if done_b else None
+            return {"files_total": len(files), "files_finished": totals["finished"],
+                    "converted": counts["done"], "failed": counts["failed"], "saved_bytes": totals["saved"],
+                    "bytes_total": total_bytes, "bytes_finished": done_b, "elapsed": int(elapsed),
+                    "eta_seconds": int(eta) if eta is not None else None, "active": active}
+
     def show_progress():
-        """With several jobs: one combined progress line, redrawn every second."""
+        """With several jobs: one combined progress line, redrawn every second.
+        With --progress-lines: a JSON progress line every couple of seconds instead."""
         while not finished_all.is_set():
-            time.sleep(1)
+            time.sleep(2 if args.progress_lines else 1)
+            if args.progress_lines:
+                print(PROGRESS_PREFIX + json.dumps(progress_record()), flush=True)
+                continue
             if not tty or prompting.is_set():
                 continue
             with lock:
@@ -2257,9 +2288,8 @@ def main():
                 print(line, flush=True)
 
         def prog(text):
-            if multi:
-                slot_text[slot] = text
-            else:
+            slot_text[slot] = text
+            if not multi:
                 progress(text)
 
         say(f"[{n}/{len(files)}] {path}  ({human(size)})")
@@ -2458,7 +2488,7 @@ def main():
         free_slots.put(i)
     threads = []
     ticker = threading.Thread(target=show_progress, daemon=True)
-    if multi:
+    if multi or args.progress_lines:
         ticker.start()
 
     stopped_for_space = False
@@ -2518,6 +2548,8 @@ def main():
         while t.is_alive():
             t.join(timeout=1)
     finished_all.set()
+    if args.progress_lines:
+        print(PROGRESS_PREFIX + json.dumps(progress_record()), flush=True)
     if multi and tty:
         print()
 

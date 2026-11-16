@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mediatool agent</title>
+<style>
+:root {
+  --bg: #f4f4f1; --panel: #ffffff; --ink: #1d1f21; --muted: #6b6f73; --line: #dcdcd6;
+  --accent: #2d6a4f; --warn: #a4471c; --bar: #e7e7e1; --code: #f0f0eb;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #15171a; --panel: #1d2024; --ink: #e6e6e3; --muted: #9a9ea3; --line: #30343a;
+          --accent: #74c69d; --warn: #f4a261; --bar: #2a2e33; --code: #121416; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, sans-serif; }
+main { max-width: 1000px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; margin-bottom: 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 13px; color: var(--muted); }
+.chip.ok { color: var(--accent); border-color: var(--accent); }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
+label { display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--muted); }
+label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--ink); }
+input, select, button { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 7px 9px; min-width: 0; }
+button { background: var(--accent); color: var(--panel); border-color: var(--accent); cursor: pointer; font-weight: 600; }
+button.plain { background: transparent; color: var(--ink); border-color: var(--line); font-weight: 400; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+.bar { height: 10px; background: var(--bar); border-radius: 5px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); width: 0; transition: width .5s; }
+.muted { color: var(--muted); font-size: 13px; }
+.error { color: var(--warn); }
+pre { background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin: 10px 0 0;
+  max-height: 420px; overflow: auto; font: 12.5px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-all; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr.pick { cursor: pointer; }
+tr.pick:hover td { background: var(--bar); }
+.hide { display: none !important; }
+.active-file { margin-top: 8px; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="name">mediatool agent</h1>
+    <span class="muted" id="version"></span>
+    <div class="chips" id="chips"></div>
+  </header>
+
+  <section id="jobbox" class="hide">
+    <h2 id="jobtitle">Job</h2>
+    <div class="muted" id="jobstate"></div>
+    <div id="progress" class="hide" style="margin-top:10px">
+      <div class="bar"><div id="barfill"></div></div>
+      <div class="muted" id="progresstext" style="margin-top:6px"></div>
+      <div id="activefiles"></div>
+    </div>
+    <div class="row">
+      <button class="plain" id="stopafter">Stop after current file</button>
+      <button class="plain" id="stopnow">Stop now</button>
+    </div>
+    <pre id="output"></pre>
+  </section>
+
+  <section>
+    <h2>Start a job</h2>
+    <form id="form">
+      <div class="grid">
+        <label>Job
+          <select name="kind" id="kind">
+            <option value="convert">Convert</option>
+            <option value="check">Check Clean copies</option>
+            <option value="replace">Replace originals</option>
+            <option value="rename_suffix">Give -noidea back</option>
+            <option value="status">Refresh status file</option>
+            <option value="organize">Organize (dry run)</option>
+            <option value="apply_plan">Apply organize plan</option>
+            <option value="undo">Undo organize run</option>
+          </select>
+        </label>
+        <label data-for="convert check replace rename_suffix status organize">Folder or file
+          <input name="paths" placeholder="/data/Movies/Some Film (2001)" autocomplete="off">
+        </label>
+        <label data-for="convert">Profile
+          <select name="profile"><option>live</option><option>animated</option></select>
+        </label>
+        <label data-for="convert">Files at once
+          <select name="jobs"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+        </label>
+        <label data-for="convert organize">First N folders (0 = all)
+          <input name="folders" type="number" min="0" value="0">
+        </label>
+        <label data-for="organize">Mode
+          <select name="mode"><option>rename</option><option>restructure</option><option>newtree</option></select>
+        </label>
+        <label data-for="apply_plan">Plan
+          <select name="plan" id="plans"><option value="latest">latest</option></select>
+        </label>
+        <label data-for="undo">Undo log
+          <select name="log" id="logs"><option value="latest">latest</option></select>
+        </label>
+      </div>
+      <div class="row">
+        <label class="check" data-for="convert"><input type="checkbox" name="dry_run" checked> Dry run</label>
+        <label class="check" data-for="convert"><input type="checkbox" name="retry_failed"> Retry failed</label>
+        <label class="check" data-for="replace rename_suffix apply_plan undo"><input type="checkbox" name="confirm">
+          I checked the dry run; go ahead and change files</label>
+      </div>
+      <div class="row">
+        <button type="submit">Start</button>
+        <span id="formmsg" class="muted"></span>
+      </div>
+    </form>
+  </section>
+
+  <section>
+    <h2>Recent jobs</h2>
+    <table><tbody id="jobs"></tbody></table>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null, since = 0, follow = null;
+
+function human(b) {
+  if (b == null) return "?";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+  return (i ? b.toFixed(1) : b) + " " + u[i];
+}
+function hms(s) {
+  if (s == null) return "--";
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+}
+function when(t) { return t ? new Date(t * 1000).toLocaleString() : ""; }
+async function api(path, body) {
+  const opts = body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {};
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+function chip(text, ok) {
+  const s = document.createElement("span");
+  s.className = "chip" + (ok ? " ok" : ""); s.textContent = text; return s;
+}
+function describe(job) {
+  const a = job.args || {};
+  const where = Array.isArray(a.paths) ? a.paths.join(", ") : (a.paths || a.plan || a.log || "");
+  return job.kind.replace("_", " ") + (a.mode ? " (" + a.mode + ")" : "") + (a.dry_run ? " - dry run" : "") +
+         (where ? "  " + where : "");
+}
+
+async function refreshStatus() {
+  try {
+    const s = await api("/api/status");
+    $("name").textContent = s.name;
+    $("version").textContent = "tinyclean " + s.version + " on " + s.host;
+    const c = $("chips"); c.replaceChildren();
+    c.append(chip(s.job ? "busy" : "idle", !s.job));
+    c.append(chip(s.gpu ? "GPU" : "no GPU", s.gpu));
+    c.append(chip(s.ffmpeg ? "ffmpeg: " + s.ffmpeg : "no ffmpeg", !!s.ffmpeg));
+    c.append(chip(s.plex ? "Plex set up" : "no Plex", s.plex));
+    if (s.memory.available) c.append(chip("RAM free " + human(s.memory.available), true));
+    for (const d of s.disks) c.append(chip(d.path + " free " + human(d.free), !d.missing));
+    if (s.job && !current) show(s.job.id);
+  } catch (e) { $("version").textContent = "agent not reachable: " + e.message; }
+}
+
+async function refreshJobs() {
+  const data = await api("/api/jobs?limit=30");
+  const body = $("jobs"); body.replaceChildren();
+  for (const j of data.jobs) {
+    const tr = document.createElement("tr"); tr.className = "pick";
+    tr.onclick = () => show(j.id);
+    for (const t of [when(j.created), j.state, describe(j)]) {
+      const td = document.createElement("td"); td.textContent = t; tr.append(td);
+    }
+    body.append(tr);
+  }
+  const plans = await api("/api/plans"), logs = await api("/api/undo");
+  fill($("plans"), plans.plans, (p) => p.name + " - " + p.mode + ", " + p.items + " change(s)");
+  fill($("logs"), logs.logs.filter((l) => !l.name.includes(".undone")), (l) => l.name + " - " + l.mode + ", " + l.changes + " change(s)");
+}
+function fill(sel, items, label) {
+  const keep = sel.value; sel.replaceChildren(new Option("latest", "latest"));
+  for (const it of items) sel.append(new Option(label(it), it.name));
+  sel.value = [...sel.options].some((o) => o.value === keep) ? keep : "latest";
+}
+
+function show(id) {
+  current = id; since = 0; $("output").textContent = ""; $("jobbox").classList.remove("hide");
+  clearTimeout(follow); poll();
+}
+async function poll() {
+  if (!current) return;
+  let job;
+  try { job = await api("/api/jobs/" + current + "?since=" + since); }
+  catch (e) { $("jobstate").textContent = e.message; return; }
+  $("jobtitle").textContent = describe(job);
+  $("jobstate").textContent = job.state + " - started " + when(job.created) +
+    (job.ended ? ", ended " + when(job.ended) : "") + (job.returncode != null ? ", exit " + job.returncode : "");
+  if (job.lines.length) {
+    const out = $("output"), atEnd = out.scrollTop + out.clientHeight >= out.scrollHeight - 20;
+    out.textContent += job.lines.join("\n") + "\n";
+    if (atEnd) out.scrollTop = out.scrollHeight;
+  }
+  since = job.first_line + job.lines.length;
+  const p = job.progress;
+  $("progress").classList.toggle("hide", !p);
+  if (p) {
+    const pct = p.bytes_total ? 100 * (p.bytes_finished + p.active.reduce((s, a) => s + a.bytes * a.pct / 100, 0)) / p.bytes_total : 0;
+    $("barfill").style.width = pct.toFixed(1) + "%";
+    $("progresstext").textContent = p.files_finished + " of " + p.files_total + " files, " + pct.toFixed(1) +
+      "%, saved " + human(p.saved_bytes) + ", " + p.failed + " failed, about " + hms(p.eta_seconds) + " left";
+    const af = $("activefiles"); af.replaceChildren();
+    for (const a of p.active) {
+      const d = document.createElement("div"); d.className = "active-file muted";
+      d.textContent = a.file.split("/").pop() + ": " + a.pct.toFixed(1) + "%  " + a.speed + "  ETA " + a.eta;
+      af.append(d);
+    }
+  }
+  const live = job.state === "running" || job.state === "stopping";
+  $("stopafter").classList.toggle("hide", !live || job.kind !== "convert");
+  $("stopnow").classList.toggle("hide", !live);
+  if (live) follow = setTimeout(poll, 1500); else refreshJobs();
+}
+$("stopafter").onclick = () => api("/api/jobs/" + current + "/stop", {after_current: true}).catch((e) => alertMsg(e));
+$("stopnow").onclick = () => api("/api/jobs/" + current + "/stop", {}).catch((e) => alertMsg(e));
+function alertMsg(e) { $("formmsg").textContent = e.message; $("formmsg").className = "error"; }
+
+function showFields() {
+  const kind = $("kind").value;
+  for (const el of document.querySelectorAll("[data-for]"))
+    el.classList.toggle("hide", !el.dataset.for.split(" ").includes(kind));
+}
+$("kind").onchange = showFields;
+$("form").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const f = new FormData($("form")), kind = f.get("kind"), args = {};
+  for (const el of document.querySelectorAll("[data-for]")) {
+    if (el.classList.contains("hide")) continue;
+    const input = el.querySelector("input, select");
+    if (!input) continue;
+    args[input.name] = input.type === "checkbox" ? input.checked : input.value;
+  }
+  if (args.paths !== undefined) args.paths = [args.paths];
+  $("formmsg").className = "muted"; $("formmsg").textContent = "starting...";
+  try {
+    const job = await api("/api/jobs", {kind, args});
+    $("formmsg").textContent = ""; show(job.id); refreshJobs();
+  } catch (e) { alertMsg(e); }
+};
+showFields(); refreshStatus(); refreshJobs();
+setInterval(refreshStatus, 10000);
+</script>
+</body>
+</html>

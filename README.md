@@ -48,14 +48,58 @@ Files that already meet the rules are remuxed (no quality loss).
   twice, and lists videos that have no Clean copy yet. Nothing is deleted until
   you type `replace`. `--check` does the same report without changing anything.
 
-## Install
+## Install and update
 
-Needs Python 3 and `jellyfin-ffmpeg` (or any ffmpeg with Quick Sync), plus
-access to `/dev/dri/renderD128`.
+Needs Python 3.9 or newer, `jellyfin-ffmpeg` (or any ffmpeg with Quick Sync),
+access to `/dev/dri/renderD128`, and a `media` user that can write to the
+library. On each transcoder, as root:
 
 ```
-install -m 755 tinyclean.py /usr/local/bin/tinyclean
+t=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/Noidea24/tinyclean/main/deploy/install.sh -o "$t" && bash "$t"; rm -f "$t"
 ```
+
+The same command updates. It installs the newest release (a tag on GitHub, never
+unreleased work); `bash "$t" v8.2` installs a given one. It:
+
+- puts the release in `/opt/mediatool/releases/<tag>` and points
+  `/opt/mediatool/current` at it, keeping the previous two for going back;
+- makes `tinyclean` a launcher for the installed release;
+- creates `/etc/mediatool/mediatool.env` (root and the media group only) and
+  adds an `AGENT_TOKEN` to it the first time;
+- installs and starts the `mediatool-agent` service, running as `media`.
+
+An update refuses to restart the agent while a job is running (`--force`
+overrides). Going back a release: `bash "$t" v8.1.1`.
+
+## Agent
+
+The agent is a small web service on port 8770 that runs tinyclean for the
+dashboard, as the `media` user. It starts only the jobs it knows (convert,
+check, replace, give back -noidea, refresh status, organize, apply a plan,
+undo), with options it builds itself, on paths inside the library folders
+(`AGENT_ROOTS`, default `/data`). One job runs at a time; its output and
+progress are kept, so a page can follow it live or come back later.
+
+Every request needs the token. In a browser, open `http://<transcoder>:8770/`
+and log in with any user name and the token as the password
+(`grep AGENT_TOKEN /etc/mediatool/mediatool.env` as root shows it). That page
+can start jobs and follow them; the dashboard will use the same API with the
+token as a Bearer header. Replace, give back -noidea, apply and undo need the
+"I checked the dry run" box.
+
+Settings in `/etc/mediatool/mediatool.env`:
+
+| Setting | Default | |
+|---|---|---|
+| `AGENT_TOKEN` | made by the installer | at least 24 characters |
+| `AGENT_PORT` | 8770 | |
+| `AGENT_BIND` | 0.0.0.0 | |
+| `AGENT_ROOTS` | /data | folders jobs may touch, comma separated |
+| `AGENT_NAME` | host name | |
+| `PLEX_URL`, `PLEX_TOKEN`, `PLEX_PATH_MAP` | | for organizing, see below |
+
+After changing it: `systemctl restart mediatool-agent`. Logs:
+`journalctl -u mediatool-agent`.
 
 ## Use
 
@@ -82,7 +126,7 @@ started, with sizes, so you can review and replace one folder at a time.
 | live | faster | 22 / 22 |
 
 Other options: `--jobs N`, `--batch N`, `--min-free-gb`, `--keep-hdr`, `--keep-sample`,
-`--limit`, `--retry-failed`, `--state-dir`, `--check`, `--rename-suffix`.
+`--limit`, `--folders N` (first N show/movie folders), `--retry-failed`, `--state-dir`, `--check`, `--rename-suffix`.
 Tagging old files needs `mkvpropedit` (`apt install mkvtoolnix`). Ctrl+C stops cleanly; touching
 `~/.tinyclean/STOP` finishes the current file, then stops.
 
@@ -148,16 +192,6 @@ group whose token has no value disappears, so `{title} ({imdb}) {year}` gives
 
 After applying, rescan the library in Plex and Refresh in Sonarr/Radarr.
 
-## Updating
-
-On each worker, as root:
-
-```
-t=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/Noidea24/tinyclean/main/tinyclean.py -o "$t" && install -m 755 "$t" /usr/local/bin/tinyclean && rm -f "$t"
-```
-
-A fresh temporary file each time, so a copy another user left in /tmp cannot block the download.
-
 ## With Sonarr and Radarr
 
 Leave `-noidea` out of Sonarr's and Radarr's naming formats. tinyclean skips
@@ -180,6 +214,8 @@ for each kind of file, the checks a copy must pass, the memory guard, and full
 runs of the command on a small generated library (convert, check, replace, a
 short copy refused, a damaged original, a failed move, `--rename-suffix`), and
 the organizer against a small fake Plex (templates, every mode, clashes, apply,
-undo, stale plans). The
-tests make their own small videos, so they need ffmpeg and ffprobe on PATH.
+undo, stale plans), and the agent (logins, refused requests, following a job,
+stopping it). The tests make their own small videos, so they need ffmpeg and
+ffprobe on PATH. CI also runs the installer as root on a fresh machine and asks
+the started agent for its status.
 GitHub Actions runs them on Python 3.11 and 3.12 for every push and tag.

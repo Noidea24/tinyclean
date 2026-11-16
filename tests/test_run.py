@@ -141,3 +141,16 @@ def test_already_efficient_hevc_is_remuxed_not_re_encoded(tmp_path, home):
     copy = lib / "Show" / "S01" / "Clean" / "Show - S01E01-noidea.mkv"
     assert [s["codec_name"] for s in probe(copy)["streams"] if s["codec_type"] == "video"] == ["hevc"]
     assert [r["result"] for r in ledger_rows(home)] == ["done"]
+
+
+def test_progress_lines_and_folder_limit(tmp_path, home):
+    import json
+    lib = tmp_path / "Movies"
+    make_video(lib / "A (2001)" / "A.mkv")
+    make_video(lib / "B (2002)" / "B.mkv")
+    out = run_cli(lib, *CONVERT, "--folders", "1", "--progress-lines", home=home).stdout
+    assert "Only the first 1 show/movie folder(s) this run." in out
+    records = [json.loads(l[len("@progress "):]) for l in out.splitlines() if l.startswith("@progress ")]
+    assert records and records[-1]["files_total"] == 1 and records[-1]["files_finished"] == 1
+    assert records[-1]["converted"] == 1 and records[-1]["active"] == []
+    assert (lib / "A (2001)" / "Clean").is_dir() and not (lib / "B (2002)" / "Clean").exists()

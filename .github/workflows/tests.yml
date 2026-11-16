@@ -28,6 +28,38 @@ jobs:
       - name: Install pytest
         run: python -m pip install pytest
       - name: Compile
-        run: python -m py_compile tinyclean.py
+        run: python -m py_compile engine/tinyclean.py agent/agent.py
       - name: Test
         run: python -m pytest -q
+
+  install:
+    # The installer, run for real as root on a fresh machine with systemd, then the agent asked for its status.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Make a media user and a library
+        run: |
+          sudo useradd --create-home media
+          sudo mkdir -p /data/Movies && sudo chown media /data/Movies
+      - name: Install
+        run: sudo bash deploy/install.sh --from "$PWD"
+      - name: The agent answers, only with its token
+        run: |
+          token=$(sudo sed -n 's/^AGENT_TOKEN=//p' /etc/mediatool/mediatool.env)
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8770/api/status)" = 401
+          curl -fsS -H "Authorization: Bearer $token" http://127.0.0.1:8770/api/status | tee status.json
+          python3 -c 'import json; s = json.load(open("status.json")); assert s["job"] is None and s["roots"] == ["/data"]'
+          systemctl show -p User --value mediatool-agent | grep -qx media
+          sudo stat -c '%U:%G %a' /etc/mediatool/mediatool.env | grep -qx 'root:media 640'
+      - name: The tinyclean command runs the installed copy
+        run: |
+          tinyclean --help | grep -q -- --organize
+          sudo -u media tinyclean --check /data/Movies
+      - name: Installing again keeps the token
+        run: |
+          before=$(sudo grep -c AGENT_TOKEN /etc/mediatool/mediatool.env)
+          sudo bash deploy/install.sh --from "$PWD"
+          test "$(sudo grep -c AGENT_TOKEN /etc/mediatool/mediatool.env)" = "$before"
+      - name: Agent log
+        if: always()
+        run: sudo journalctl -u mediatool-agent --no-pager -n 50 || true
