@@ -492,7 +492,24 @@ async function viewJob(v, agent, id) {
   const actions = h("div", { class: "row" });
   const after = h("div", {});
   v.append(h("section", {}, h("div", { class: "head" }, title), state, prog, actions, out), after);
-  let since = 0, lines = [], shownAfter = false;
+  let since = 0, lines = [], shownAfter = false, current = null;
+  const download = h("button", { class: "plain", text: "Download .txt", onclick: () => {
+    if (!current) return;
+    const stamp = (t) => (t ? new Date(t * 1000).toLocaleString() : "");
+    const head = [
+      `mediatool job ${current.id} on ${agent}`,
+      `${describe(current)}`,
+      `state: ${current.state}` + (current.returncode != null ? `, exit code ${current.returncode}` : ""),
+      `started: ${stamp(current.created)}` + (current.ended ? `, ended: ${stamp(current.ended)}` : ""),
+      `settings: ${JSON.stringify(current.args)}`,
+      "",
+    ];
+    const blob = new Blob([head.concat(lines).join("\n") + "\n"], { type: "text/plain" });
+    const a = h("a", { href: URL.createObjectURL(blob), download: `mediatool-${current.kind}-${agent}-${current.id}.txt` });
+    document.body.append(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  } });
   const stopNow = h("button", { class: "plain", text: "Stop now", onclick: () => agentApi(agent, `jobs/${id}/stop`, {}).catch((e) => alert(e.message)) });
   const stopAfter = h("button", { class: "plain", text: "Stop after the current file",
     onclick: () => agentApi(agent, `jobs/${id}/stop`, { after_current: true }).catch((e) => alert(e.message)) });
@@ -514,7 +531,8 @@ async function viewJob(v, agent, id) {
     since = job.first_line + job.lines.length;
     prog.replaceChildren(progressBlock(job.progress) || "");
     const live = job.state === "running" || job.state === "stopping";
-    actions.replaceChildren(...(live ? [job.kind === "convert" && stopAfter, stopNow] : []).filter(Boolean));
+    current = job;
+    actions.replaceChildren(...(live ? [job.kind === "convert" && stopAfter, stopNow] : []).filter(Boolean), download);
     if (live) later(poll, 1500);
     else if (!shownAfter) { shownAfter = true; out.scrollTop = out.scrollHeight; await afterJob(after, agent, job, lines); }
   }
