@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.3"
+VERSION = "8.3.1"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1649,6 +1649,11 @@ def read_library(plex, mapped):
         if section["type"] == "movie":
             for meta in plex.all(f"/library/sections/{key}/all", type=1, includeGuids=1):
                 parts = [(m, p) for m in meta.get("Media", []) for p in m.get("Part", [])]
+                # Plex keeps a moved or deleted file as an "unavailable" copy until its trash is emptied.
+                # Those are not real second versions: drop them while another part is still on disk.
+                present = [(m, p) for m, p in parts if Path(mapped(p["file"])).exists()]
+                if present and len(present) < len(parts):
+                    parts = present
                 ids = plex_ids(meta)
                 for media, part in parts:
                     f = Path(mapped(part["file"]))
@@ -1671,9 +1676,12 @@ def read_library(plex, mapped):
             episodes = plex.all(f"/library/sections/{key}/all", type=4)
             per_file = {}
             for ep in episodes:
-                for media in ep.get("Media", []):
-                    for part in media.get("Part", []):
-                        per_file.setdefault(part["file"], []).append((ep, media))
+                files = [(media, part) for media in ep.get("Media", []) for part in media.get("Part", [])]
+                present = [(m, p) for m, p in files if Path(mapped(p["file"])).exists()]
+                if present and len(present) < len(files):
+                    files = present            # the rest are unavailable leftovers in Plex, see above
+                for media, part in files:
+                    per_file.setdefault(part["file"], []).append((ep, media))
             for plex_file, uses in per_file.items():
                 f = Path(mapped(plex_file))
                 ep, media = uses[0]
@@ -1772,9 +1780,65 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
     if folders:
         groups = list(dict.fromkeys((it["root"], it["group"]) for it in kept))[:folders]
         kept = [it for it in kept if (it["root"], it["group"]) in groups]
+    extras = [] if mode == "rename" else plan_extras(kept, mode, new_root_suffix, skips)
     return {"version": 1, "created": time.time(), "mode": mode, "templates": templates,
             "new_root_suffix": new_root_suffix,
-            "items": kept, "skipped": sorted(skips), "unchanged": unchanged}
+            "items": kept, "extras": extras, "skipped": sorted(skips), "unchanged": unchanged}
+
+
+def plan_extras(items, mode, new_root_suffix, skips):
+    """Everything else in a movie's or show's old folder (posters, .nfo files, extras, subtitle folders)
+    goes along with its videos, so the old folder ends up empty and is removed. Only when that folder
+    belongs to this one movie or show alone: a movie folder with another movie directly in it, or a show
+    folder with an episode that is not moving, keeps everything that is not a planned video."""
+    by_group = {}
+    for it in items:
+        by_group.setdefault((it["root"], it["group"]), []).append(it)
+    extras = []
+    for (root, group), its in by_group.items():
+        root = Path(root)
+        gdir = root / group
+        if not gdir.is_dir():
+            continue
+        new_root = root.with_name(root.name + new_root_suffix) if mode == "newtree" else root
+        tops = {Path(it["new"]).relative_to(new_root).parts[0] for it in its}
+        if len(tops) != 1:
+            continue
+        top = new_root / tops.pop()
+        if mode != "newtree" and top == gdir:
+            continue                    # the folder keeps its name; its other files are already in place
+        planned = {it["old"] for it in its} | {s_old for it in its for s_old, _ in it["sidecars"]}
+        movie = Path(its[0]["new"]).parent == top and len(its) == 1
+        parents = {}
+        for it in its:
+            parents.setdefault(str(Path(it["old"]).parent), set()).add(str(Path(it["new"]).parent))
+        mine, blocked = [], None
+        for dirpath, dirnames, filenames in os.walk(gdir):
+            dirnames[:] = [d for d in dirnames if d != CLEAN_DIR]
+            for name in filenames:
+                f = Path(dirpath) / name
+                if str(f) in planned:
+                    continue
+                if f.suffix.lower() in VIDEO_EXTS and (not movie or f.parent == gdir):
+                    blocked = f
+                    break
+                mine.append(f)
+            if blocked:
+                break
+        if blocked:
+            skips.append((str(gdir), f"other files stay in the old folder: it also holds {blocked.name}, "
+                                     "which is not part of this change"))
+            continue
+        if any((Path(dirpath) / CLEAN_DIR).is_dir() for dirpath, _, _ in os.walk(gdir)):
+            continue
+        for f in mine:
+            moved_to = parents.get(str(f.parent), set())
+            new = (Path(next(iter(moved_to))) / f.name) if len(moved_to) == 1 else top / f.relative_to(gdir)
+            if new.exists():
+                skips.append((str(f), f"stays in the old folder: name already in use: {new}"))
+                continue
+            extras.append({"old": str(f), "new": str(new), "root": str(root), "group": group})
+    return extras
 
 
 def show_plan(plan):
@@ -1793,9 +1857,17 @@ def show_plan(plan):
         print(f"\nSkipped ({len(plan['skipped'])}):")
         for path, why in plan["skipped"]:
             print(f"  {path}\n    {why}")
+    extras = plan.get("extras", [])
+    if extras:
+        print(f"\nOther files moving with them ({len(extras)}), so the old folders end up empty:")
+        for x in extras[:200]:
+            print(f"  {os.path.relpath(x['old'], x['root'])}  ->  {os.path.relpath(x['new'], x['root'])}")
+        if len(extras) > 200:
+            print(f"  ... and {len(extras) - 200} more")
     sc = sum(len(it["sidecars"]) for it in plan["items"])
     verb = {"rename": "rename", "restructure": "move", "newtree": "hard-link into the new tree"}[plan["mode"]]
-    print(f"\nWill {verb} {len(plan['items'])} video(s)" + (f" and {sc} sidecar file(s)" if sc else "")
+    print(f"\nWill {verb} {len(plan['items'])} video(s)" + (f", {sc} subtitle/info file(s)" if sc else "")
+          + (f" and {len(extras)} other file(s)" if extras else "")
           + f"; {plan['unchanged']} already named right; {len(plan['skipped'])} skipped.")
 
 
@@ -1850,7 +1922,7 @@ def organize(args, state_dir):
 
 
 def newest(folder, pattern):
-    found = sorted(folder.glob(pattern))
+    found = sorted(f for f in folder.glob(pattern) if not f.name.endswith(".undone.json"))
     return found[-1] if found else None
 
 
@@ -1933,6 +2005,24 @@ def apply_plan(plan_arg, state_dir, yes):
         if not link:
             remove_empty_dirs(old.parent, root)
         print(f"  {'linked' if link else 'done'}  {new}")
+    groups_done = {(it["root"], it["group"]) for it in plan["items"]
+                   if not any(p == it["old"] for p, _ in problems)}
+    extras_done = 0
+    for x in plan.get("extras", []):
+        if (x["root"], x["group"]) not in groups_done:
+            continue
+        old, new, root = Path(x["old"]), Path(x["new"]), Path(x["root"])
+        if not old.exists():
+            continue
+        why = place(old, new, root)
+        if why:
+            problems.append((x["old"], why))
+            continue
+        extras_done += 1
+        if not link:
+            remove_empty_dirs(old.parent, root)
+    if extras_done:
+        print(f"  ...and {extras_done} other file(s) {'linked' if link else 'moved'} with them")
     for p, why in problems:
         print(f"  [skip] {p}: {why}")
     print(f"\n{done} of {len(plan['items'])} video(s) {'linked' if link else 'moved'}. "

@@ -536,7 +536,9 @@ async function afterJob(box, agent, job, lines) {
         h("p", { class: "muted", text: "Applies exactly the plan above, on files that have not changed since. Every applied run can be undone from Organize." }),
         h("button", { class: "danger", text: `Apply ${plan.items.length} change(s)...`, onclick: async () => {
           const verb = { rename: "renamed", restructure: "renamed and moved", newtree: "hard-linked into a new tree" }[plan.mode];
-          if (!await confirmBox("Apply this plan?", [`${plan.items.length} video(s) will be ${verb}, with their subtitle files.`,
+          const more = (plan.extras || []).length;
+          if (!await confirmBox("Apply this plan?", [`${plan.items.length} video(s) will be ${verb}, with their subtitle files` +
+            (more ? ` and ${more} other file(s) from their folders.` : "."),
             "Nothing is deleted. Undo puts the names back."], "apply", "Apply")) return;
           try { await startJob(agent, "apply_plan", { plan: name, confirm: true }); } catch (e) { alert(e.message); }
         } })));
@@ -560,6 +562,12 @@ function planTable(plan) {
     ...plan.items.map((it) => h("tr", {}, h("td", { class: "path", text: rel(it.old, it.root) }),
       h("td", { class: "path" }, rel(it.new, plan.mode === "newtree" ? it.root.replace(/\/[^/]+$/, "") : it.root),
         ...it.sidecars.map((s) => h("div", { class: "file-line", text: "+ " + s[1].split("/").pop() }))))))));
+  const extras = plan.extras || [];
+  if (extras.length) sec.append(h("h2", { text: `Other files moving with them (${extras.length}), so the old folders end up empty`, style: "margin-top:16px" }),
+    h("div", { class: "tablewrap" }, h("table", {},
+      h("tr", {}, h("th", { text: "Now" }), h("th", { text: "Becomes" })),
+      ...extras.map((x) => h("tr", {}, h("td", { class: "path", text: rel(x.old, x.root) }),
+        h("td", { class: "path", text: rel(x.new, plan.mode === "newtree" ? x.root.replace(/\/[^/]+$/, "") : x.root) }))))));
   if (plan.skipped.length) sec.append(h("h2", { text: "Skipped", style: "margin-top:16px" }), h("div", { class: "tablewrap" }, h("table", {},
     h("tr", {}, h("th", { text: "File" }), h("th", { text: "Why" })),
     ...plan.skipped.map(([p, why]) => h("tr", {}, h("td", { class: "path", text: p }), h("td", { text: why }))))));

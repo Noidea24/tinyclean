@@ -306,7 +306,7 @@ def test_command_dry_run_apply_and_undo(lib, plex_server, tmp_path):
     env = tmp_path / "mediatool.env"
     env.write_text(f"PLEX_URL={url}\nPLEX_TOKEN=secret\n")
     out = run_cli(lib["movies"], "--organize", "restructure", "--env-file", env, home=home).stdout
-    assert "Will move 2 video(s) and 1 sidecar file(s)" in out and "Dry run only: nothing changed." in out
+    assert "Will move 2 video(s), 1 subtitle/info file(s)" in out and "Dry run only: nothing changed." in out
     assert "secret" not in out
     assert lib["heat"].is_file()
     result = run_cli("--apply-plan", "latest", home=home, check=False)
@@ -352,3 +352,62 @@ def test_command_explains_when_plex_sees_other_paths(lib, plex_server, tmp_path)
     out = run_cli(elsewhere, "--organize", "rename", "--env-file", env, home=home).stdout
     assert f"[movie]: {lib['movies']}" in out and "Plex knows 4 video file(s)" in out
     assert "None of Plex's files are under" in out and "PLEX_PATH_MAP" in out
+
+
+# ----------------------------------------------------- the rest of a folder --
+
+def test_restructure_takes_posters_extras_and_subfolders_along(tc, lib, tmp_path):
+    folder = lib["matrix"].parent
+    touch(folder / "poster.jpg", b"jpg")
+    touch(folder / "movie.nfo", b"nfo")
+    touch(folder / "Subs" / "2_English.srt", b"srt")
+    touch(folder / "Featurettes" / "Making of.mkv", b"video")
+    touch(lib["shows"] / "breaking bad" / "poster.jpg", b"jpg")
+    touch(lib["shows"] / "breaking bad" / "S1" / "season01-poster.jpg", b"jpg")
+    state = tmp_path / "state"
+    before = tree(tmp_path / "Movies") + tree(tmp_path / "Shows")
+    p = plan(tc, lib, "restructure")
+    assert len(p["extras"]) == 6
+    tc.apply_plan(str(save(tc, state, p)), state, yes=True)
+    assert not folder.exists() and not (lib["shows"] / "breaking bad").exists()
+    new = lib["movies"] / "The Matrix (1999) {tmdb-603}"
+    assert sorted(str(f.relative_to(new)) for f in new.rglob("*") if f.is_file()) == [
+        "Featurettes/Making of.mkv", "Subs/2_English.srt", "The Matrix (1999)-noidea.en.srt",
+        "The Matrix (1999)-noidea.mkv", "movie.nfo", "poster.jpg"]
+    show = lib["shows"] / "Breaking Bad (2008) {tvdb-81189}"
+    assert (show / "poster.jpg").is_file() and (show / "Season 01" / "season01-poster.jpg").is_file()
+    tc.undo_run("latest", state, yes=True)
+    assert tree(tmp_path / "Movies") + tree(tmp_path / "Shows") == before
+    assert not new.exists() and not show.exists()
+
+
+def test_a_folder_holding_another_movie_keeps_its_other_files(tc, lib):
+    touch(lib["heat"].parent / "poster.jpg", b"jpg")
+    touch(lib["heat"].parent / "Heat 2.mkv", b"another movie")
+    p = plan(tc, lib, "restructure")
+    assert not [x for x in p["extras"] if "Heat" in x["old"]]
+    assert any("Heat 2.mkv" in why for _, why in p["skipped"])
+
+
+def test_moved_files_plex_still_lists_are_not_duplicates(tc, lib):
+    gone = str(lib["movies"] / "Old Name" / "matrix.mkv")
+    lib["plex"].movies[0]["Media"].append({"videoResolution": "1080", "Part": [{"file": gone}]})
+    lib["plex"].episodes[0]["Media"].append({"videoResolution": "720", "Part": [{"file": gone + ".ep"}]})
+    p = plan(tc, lib, "rename")
+    assert not p["skipped"]
+    assert {it["old"] for it in p["items"]} >= {str(lib["matrix"]), str(lib["ep1"])}
+
+
+def test_undo_latest_walks_back_one_run_at_a_time(tc, lib, tmp_path):
+    state = tmp_path / "state"
+    before = tree(tmp_path / "Movies")
+    tc.apply_plan(str(save(tc, state, plan(tc, lib, "restructure", scope=[lib["heat"].parent]))), state, yes=True)
+    time.sleep(1.1)
+    p2 = plan(tc, lib, "restructure", scope=[lib["matrix"].parent])
+    (state / "plans" / "plan-2.json").write_text(json.dumps(p2))
+    tc.apply_plan(str(state / "plans" / "plan-2.json"), state, yes=True)
+    tc.undo_run("latest", state, yes=True)
+    tc.undo_run("latest", state, yes=True)
+    assert tree(tmp_path / "Movies") == before
+    with pytest.raises(SystemExit, match="No undo log"):
+        tc.undo_run("latest", state, yes=True)
