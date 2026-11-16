@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -580,3 +581,38 @@ def test_title_from_name(tc):
     assert tc.title_from_name("60 Days In - S01e05 -hevc-noidea.mkv") is None
     assert tc.title_from_name("No code here.mkv") is None
     assert tc.is_placeholder_title("Episode 12") and not tc.is_placeholder_title("Episode IV: A New Hope")
+
+
+def test_episodes_numbered_differently_from_plex_are_renumbered_by_title(tc, lib):
+    """All That: the files' order differs from Plex's, so Plex's title for each number is another file's."""
+    names = {16: "Silk", 17: "Terry Ellis", 18: "Faith Evans"}        # what the files say
+    plex = {16: "Terry Ellis", 17: "Faith Evans", 18: "Silk"}         # what Plex has at each number
+    files = {}
+    for n, t in names.items():
+        files[n] = touch(lib["shows"] / "breaking bad" / "S2" / f"s02e{n} - {t}-noidea.mkv")
+        lib["plex"].episodes.append(episode("10", 2, n, plex[n], str(files[n])))
+    special = touch(lib["shows"] / "breaking bad" / "s00e01 - Good Burger Special-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 0, 1, "10th Anniversary Reunion Special Part 1", str(special)))
+    p = plan(tc, lib, "rename")
+    new = {it["old"]: Path(it["new"]).name for it in p["items"]}
+    assert new[str(files[16])] == "Breaking Bad (2008) - S02E18 - Silk-noidea.mkv"
+    assert new[str(files[17])] == "Breaking Bad (2008) - S02E16 - Terry Ellis-noidea.mkv"
+    assert new[str(files[18])] == "Breaking Bad (2008) - S02E17 - Faith Evans-noidea.mkv"
+    assert all("renumbered" in it["note"] for it in p["items"] if it["old"] in map(str, files.values()))
+    assert "does not match Plex" in dict(p["skipped"])[str(special)]
+
+
+def test_synology_eadir_folders_are_removed_not_moved(tc, lib, tmp_path):
+    ea = lib["heat"].parent / "@eaDir" / "heat.mkv@SynoEAStream"
+    touch(ea, b"syno")
+    p = plan(tc, lib, "restructure")
+    assert not [x for x in p["extras"] if "@eaDir" in x["old"]]
+    assert [c["kind"] for c in p["clean_leftovers"]] == ["synology"]
+    state = tmp_path / "state"
+    tc.apply_plan(str(save(tc, state, p)), state, yes=True)
+    assert not lib["heat"].parent.exists()
+
+
+def test_an_eadir_with_someone_elses_file_is_kept(tc, lib):
+    touch(lib["heat"].parent / "@eaDir" / "notes.txt", b"mine")
+    assert not plan(tc, lib, "restructure")["clean_leftovers"]

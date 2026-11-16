@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.4.2"
+VERSION = "8.5"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1801,6 +1801,31 @@ def title_from_name(name):
     return rest or None
 
 
+def norm_title(t):
+    t = re.sub(r"(?i)\((incomplete|partial|uncut|extended)\)", " ", str(t or ""))
+    t = re.sub(r"[^a-z0-9 ]+", " ", t.lower())
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def titles_agree(a, b):
+    """Loose: the file's title and Plex's title are plausibly the same episode."""
+    na, nb = norm_title(a), norm_title(b)
+    if not na or not nb:
+        return True
+    import difflib
+    return na in nb or nb in na or difflib.SequenceMatcher(None, na, nb).ratio() >= 0.8
+
+
+def titles_same(a, b):
+    """Strict: the file's title is that episode's title (used to renumber a file)."""
+    na, nb = norm_title(a), norm_title(b)
+    if not na or not nb:
+        return False
+    import difflib
+    short, long_ = sorted((na, nb), key=len)
+    return na == nb or (len(short) >= 5 and short in long_) or difflib.SequenceMatcher(None, na, nb).ratio() >= 0.9
+
+
 def as_multi_episode(values, rng):
     """Template values for a file holding episodes first..last: S01E01-E02, no episode title
     (one title would be wrong for the other episode)."""
@@ -1816,7 +1841,17 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
         return not scope or any(f == s or s in f.parents for s in scope)
 
     items, skips, unchanged = [], [(str(f), why) for f, why in skipped if in_scope(f)], 0
+
+    def season_key(e):
+        v = e["values"]
+        return (e.get("section"), v.get("tvdb") or v.get("show"), v.get("season"))
+    seasons = {}
+    for e in entries:
+        if e["kind"] == "episode" and not e.get("multi") and not is_placeholder_title(e["values"].get("episode_title")):
+            seasons.setdefault(season_key(e), []).append((e["values"].get("episode"), e["values"].get("episode_title")))
+
     for e in sorted(entries, key=lambda e: str(e["file"])):
+        note = None
         f = e["file"]
         if not in_scope(f) or CLEAN_DIR in f.relative_to(e["root"]).parts:
             continue
@@ -1836,13 +1871,28 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                 e = {**e, "values": as_multi_episode(e["values"], rng)}
             elif is_placeholder_title(e["values"].get("episode_title")):
                 e = {**e, "values": {**e["values"], "episode_title": title_from_name(f.name)}}
+            else:
+                mine, plex_title = title_from_name(f.name), e["values"].get("episode_title")
+                if mine and not titles_agree(mine, plex_title):
+                    v = e["values"]
+                    code = f"S{int(v.get('season') or 0):02d}E{int(v.get('episode') or 0):02d}"
+                    hits = [(n, t) for n, t in seasons.get(season_key(e), []) if titles_same(mine, t)]
+                    if len(hits) == 1 and hits[0][0] != v.get("episode"):
+                        n, t = hits[0]
+                        note = (f"renumbered: the file's title \u201c{mine}\u201d is Plex's "
+                                f"S{int(v.get('season') or 0):02d}E{int(n):02d}, not {code} \u201c{plex_title}\u201d")
+                        e = {**e, "values": {**v, "episode": n, "episode_title": t}}
+                    else:
+                        skips.append((str(f), f"the file's title \u201c{mine}\u201d does not match Plex's "
+                                              f"\u201c{plex_title}\u201d for {code}: check this episode's match in Plex"))
+                        continue
         new = target_for(e, mode, templates, new_root_suffix)
         if new == f:
             unchanged += 1
             continue
         st = f.stat()
         items.append({"old": str(f), "new": str(new), "root": str(e["root"]), "group": e["group"],
-                      "section": e.get("section"),
+                      "section": e.get("section"), "note": note,
                       "size": st.st_size, "mtime": st.st_mtime_ns,
                       "sidecars": [[str(s), str(new.with_name(new.stem + s.name[len(f.stem):]))]
                                    for s in sidecars(f)]})
@@ -1868,6 +1918,21 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
             "new_root_suffix": new_root_suffix, "roots": sorted({str(e["root"]) for e in entries}),
             "items": kept, "extras": extras, "clean_leftovers": leftovers,
             "skipped": sorted(skips), "unchanged": unchanged}
+
+
+SYNO_DIR = "@eaDir"
+
+
+def only_synology_files(d):
+    """A Synology @eaDir folder holding nothing but the NAS's own index files (it rebuilds them)."""
+    try:
+        for dirpath, _, filenames in os.walk(d):
+            for name in filenames:
+                if "@Syno" not in name and not name.startswith("SYNO") and name != "Thumbs.db":
+                    return False
+        return True
+    except OSError:
+        return False
 
 
 def only_own_files(clean):
@@ -1905,8 +1970,10 @@ def plan_extras(items, mode, new_root_suffix, skips, leftovers):
         for it in its:
             parents.setdefault(str(Path(it["old"]).parent), set()).add(str(Path(it["new"]).parent))
         mine, blocked = [], None
+        syno = []
         for dirpath, dirnames, filenames in os.walk(gdir):
-            dirnames[:] = [d for d in dirnames if d != CLEAN_DIR]
+            syno += [Path(dirpath) / d for d in dirnames if d == SYNO_DIR]
+            dirnames[:] = [d for d in dirnames if d not in (CLEAN_DIR, SYNO_DIR)]
             for name in filenames:
                 f = Path(dirpath) / name
                 if str(f) in planned:
@@ -1924,7 +1991,9 @@ def plan_extras(items, mode, new_root_suffix, skips, leftovers):
         cleans = [Path(dirpath) / CLEAN_DIR for dirpath, _, _ in os.walk(gdir) if (Path(dirpath) / CLEAN_DIR).is_dir()]
         if any(not only_own_files(c) for c in cleans):
             continue                    # Clean copies still waiting somewhere in it: leave the rest alone
-        leftovers += [{"dir": str(c), "root": str(root), "group": group} for c in cleans]
+        leftovers += [{"dir": str(c), "root": str(root), "group": group, "kind": "clean"} for c in cleans]
+        leftovers += [{"dir": str(d), "root": str(root), "group": group, "kind": "synology"}
+                      for d in syno if only_synology_files(d)]
         for f in mine:
             # Follow the nearest folder whose videos all went to one place: Season 1/Subs/x.srt -> Season 01/Subs/x.srt
             d, new = f.parent, None
@@ -1968,6 +2037,8 @@ def show_plan(plan):
             old = os.path.relpath(it["old"], root)
             new = os.path.relpath(it["new"], root)
             print(f"  {old}\n    -> {new}")
+            if it.get("note"):
+                print(f"       ({it['note']})")
             for s_old, s_new in it["sidecars"]:
                 print(f"       + {Path(s_old).name}  ->  {Path(s_new).name}")
     if plan["skipped"]:
@@ -1977,8 +2048,19 @@ def show_plan(plan):
                 print(f"  {paths[0]}\n    {why}")
             else:
                 print(f"  {folder}: {len(paths)} files\n    {why}")
-    for c in plan.get("clean_leftovers", []):
-        print(f"\nLeftover Clean folder, holding only tinyclean's own notes (no copies), will be removed: {c['dir']}")
+    leftovers = plan.get("clean_leftovers", [])
+    for c in leftovers:
+        if c.get("kind") != "synology":
+            print(f"\nLeftover Clean folder, holding only tinyclean's own notes (no copies), will be removed: {c['dir']}")
+    syno = [c for c in leftovers if c.get("kind") == "synology"]
+    if syno:
+        print(f"\nSynology @eaDir index folders for the old names, removed with the old folders ({len(syno)}; "
+              "the NAS rebuilds them):")
+        for c in syno[:50]:
+            print(f"  {os.path.relpath(c['dir'], c['root'])}")
+    renumbered = [it for it in plan["items"] if it.get("note")]
+    if renumbered:
+        print(f"\n{len(renumbered)} episode(s) renumbered to match their own titles (see the notes above).")
     extras = plan.get("extras", [])
     if extras:
         print(f"\nOther files moving with them ({len(extras)}), so the old folders end up empty:")
@@ -2204,10 +2286,22 @@ def apply_plan(plan_arg, state_dir, yes, env_file=ENV_FILE):
     if extras_done:
         print(f"  ...and {extras_done} other file(s) {'linked' if link else 'moved'} with them")
     if not link:
+        syno_removed = 0
         for c in plan.get("clean_leftovers", []):
-            if (c["root"], c["group"]) in groups_done and remove_empty_clean(Path(c["dir"])):
-                print(f"  removed the leftover Clean folder {c['dir']} (it held only tinyclean's own notes)")
-                remove_empty_dirs(Path(c["dir"]).parent, Path(c["root"]))
+            if (c["root"], c["group"]) not in groups_done:
+                continue
+            d = Path(c["dir"])
+            if c.get("kind") == "synology":
+                if d.is_dir() and only_synology_files(d):
+                    import shutil
+                    shutil.rmtree(d, ignore_errors=True)
+                    syno_removed += 1
+                    remove_empty_dirs(d.parent, Path(c["root"]))
+            elif remove_empty_clean(d):
+                print(f"  removed the leftover Clean folder {d} (it held only tinyclean's own notes)")
+                remove_empty_dirs(d.parent, Path(c["root"]))
+        if syno_removed:
+            print(f"  removed {syno_removed} Synology @eaDir index folder(s) for the old names")
     for p, why in problems:
         print(f"  [skip] {p}: {why}")
     print(f"\n{done} of {len(plan['items'])} video(s) {'linked' if link else 'moved'}. "

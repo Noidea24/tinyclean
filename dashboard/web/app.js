@@ -594,6 +594,7 @@ function planTable(plan) {
     h("tr", {}, h("th", { text: "Now" }), h("th", { text: "Becomes" })),
     ...plan.items.map((it) => h("tr", {}, h("td", { class: "path", text: rel(it.old, it.root) }),
       h("td", { class: "path" }, rel(it.new, plan.mode === "newtree" ? it.root.replace(/\/[^/]+$/, "") : it.root),
+        it.note && h("div", { class: "file-line warn", text: it.note }),
         ...it.sidecars.map((s) => h("div", { class: "file-line", text: "+ " + s[1].split("/").pop() }))))))));
   const extras = plan.extras || [];
   if (extras.length) sec.append(h("h2", { text: `Other files moving with them (${extras.length}), so the old folders end up empty`, style: "margin-top:16px" }),
@@ -602,9 +603,10 @@ function planTable(plan) {
       ...extras.map((x) => h("tr", {}, h("td", { class: "path", text: rel(x.old, x.root) }),
         h("td", { class: "path", text: rel(x.new, plan.mode === "newtree" ? x.root.replace(/\/[^/]+$/, "") : x.root) }))))));
   const leftovers = plan.clean_leftovers || [];
-  if (leftovers.length) sec.append(h("h2", { text: "Leftover Clean folders that will be removed", style: "margin-top:16px" }),
-    h("p", { class: "muted", text: "These hold only tinyclean's own notes (no copies), so the old folder can go once its videos have moved." }),
-    ...leftovers.map((c) => h("div", { class: "file-line", text: c.dir })));
+  if (leftovers.length) sec.append(h("h2", { text: `Leftover folders that will be removed (${leftovers.length})`, style: "margin-top:16px" }),
+    h("p", { class: "muted", text: "Clean folders holding only tinyclean's own notes (no copies), and Synology @eaDir index folders for the old names (the NAS rebuilds them), so the old folders can go once their videos have moved." }),
+    h("details", {}, h("summary", { text: "Show them" }),
+      ...leftovers.map((c) => h("div", { class: "file-line", text: rel(c.dir, c.root) }))));
   if (plan.skipped.length) {
     const roots = (plan.roots || []).slice().sort((a, b) => b.length - a.length);
     const groups = new Map();
