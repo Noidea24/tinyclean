@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.4"
+VERSION = "8.5.5"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -2590,7 +2590,33 @@ def file_facts(path):
         return {"file": str(path), "size": None, "converted": False, "missing": True}
 
 
-def audit(args, state_dir):
+def media_facts(ffprobe_bin, path):
+    """What a person needs to tell two copies apart: running time, picture size, audio tracks, subtitles
+    (tracks inside the file, and lines in a .srt file beside it). None for anything that can't be read."""
+    out = {"minutes": None, "picture": None, "audio": [], "sub_tracks": None, "srt_lines": None}
+    if ffprobe_bin:
+        try:
+            info = ffprobe(ffprobe_bin, path)
+            out["minutes"] = round(duration_of(info) / 60, 1)
+            v = next((s for s in info.get("streams", []) if s.get("codec_type") == "video"
+                      and not disp(s, "attached_pic")), None)
+            if v:
+                out["picture"] = f"{v.get('width')}x{v.get('height')}"
+            out["audio"] = [f"{(s.get('tags') or {}).get('language', '?')} {s.get('channels', '?')}ch"
+                            for s in info.get("streams", []) if s.get("codec_type") == "audio"]
+            out["sub_tracks"] = sum(1 for s in info.get("streams", []) if s.get("codec_type") == "subtitle")
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass
+    srts = [f for f, rest in sidecar_parts(Path(path)) if f.suffix.lower() == ".srt"]
+    if srts:
+        try:
+            out["srt_lines"] = srts[0].read_text(errors="replace").count("-->")
+        except OSError:
+            pass
+    return out
+
+
+def audit(args, state_dir, ffprobe_bin=None):
     settings = plex_settings(args.env_file, args.plex_url)
     if not settings["url"] or not settings["token"]:
         sys.exit(f"Plex is not set up: put PLEX_URL and PLEX_TOKEN in {args.env_file}.")
@@ -2632,7 +2658,8 @@ def audit(args, state_dir):
         i = info.get(files[0], {})
         duplicates.append({"kind": key[0], "title": i.get("title"), "year": i.get("year"),
                            "episode": i.get("episode") if key[0] == "episode" else None,
-                           "plex_key": i.get("key"), "files": [file_facts(f) for f in files]})
+                           "plex_key": i.get("key"),
+                           "files": [{**file_facts(f), **media_facts(ffprobe_bin, f)} for f in files]})
     duplicates.sort(key=lambda d: (str(d["title"]).lower(), d["episode"] or ""))
 
     unmatched, other = {}, {}
@@ -2836,7 +2863,7 @@ def main():
     if args.organize or args.apply_plan or args.undo or args.audit or args.delete:
         org_state = Path(args.state_dir)
         if args.audit:
-            audit(args, org_state)
+            audit(args, org_state, cfg["ffprobe"])
         elif args.delete:
             delete_files(args.paths, org_state, args.yes)
         elif args.undo:

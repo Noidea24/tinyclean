@@ -774,3 +774,23 @@ def test_episode_subs_folders_follow_their_episode(tc, lib):
     assert [Path(x["path"]).name for x in p["deletes"]] == ["3_Spanish.srt"]
     x = next(x for x in p["extras"] if x["old"] == str(sub))
     assert Path(x["new"]).name == "Breaking Bad (2008) - S01E01 - Pilot.en.srt"
+
+
+def test_duplicates_show_what_tells_the_copies_apart(tc, lib, tmp_path, monkeypatch):
+    other = touch(lib["movies"] / "Heat (1995)" / "Heat.1995.720p.mkv")
+    touch(other.with_name("Heat.1995.720p.en.srt"), b"1\n00:00:01,000 --> 00:00:02,000\nhi\n\n2\n00:00:03,000 --> 00:00:04,000\nyo\n")
+    lib["plex"].movies[1]["Media"].append({"videoResolution": "720", "Part": [{"file": str(other)}]})
+    fake = {"format": {"duration": "6600"}, "streams": [
+        {"codec_type": "video", "width": 1280, "height": 720},
+        {"codec_type": "audio", "channels": 2, "tags": {"language": "eng"}},
+        {"codec_type": "subtitle"}]}
+    monkeypatch.setattr(tc, "ffprobe", lambda b, p: fake)
+    import argparse
+    env = tmp_path / "mediatool.env"
+    env.write_text("PLEX_URL=http://plex:32400/\nPLEX_TOKEN=t\n")
+    monkeypatch.setattr(tc, "Plex", lambda url, token: lib["plex"])
+    tc.audit(argparse.Namespace(env_file=str(env), plex_url=None, paths=[]), tmp_path / "st", "ffprobe")
+    a = json.loads((tmp_path / "st" / "audit.json").read_text())
+    d = next(d for d in a["duplicates"] if d["title"] == "Heat")
+    f = next(f for f in d["files"] if f["file"] == str(other))
+    assert (f["minutes"], f["picture"], f["audio"], f["sub_tracks"], f["srt_lines"]) == (110.0, "1280x720", ["eng 2ch"], 1, 2)

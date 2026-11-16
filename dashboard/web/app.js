@@ -670,6 +670,16 @@ function planTable(plan) {
 
 // --------------------------------------------------------------- needs you --
 
+function facts(f) {
+  const bits = [];
+  if (f.minutes != null) bits.push(`${f.minutes} min`);
+  if (f.picture) bits.push(f.picture);
+  if (f.audio && f.audio.length) bits.push("audio " + f.audio.join(", "));
+  if (f.sub_tracks != null) bits.push(`${f.sub_tracks} subtitle track(s)`);
+  if (f.srt_lines != null) bits.push(`.srt ${f.srt_lines} lines`);
+  return bits.join(" · ");
+}
+
 function plexLink(audit, key, text) {
   if (!key || !audit.plex || !audit.plex.machine) return null;
   const url = `${audit.plex.url}/web/index.html#!/server/${audit.plex.machine}/details?key=${encodeURIComponent("/library/metadata/" + key)}`;
@@ -700,7 +710,7 @@ async function viewNeeds(v) {
       h("div", { class: "head" }, h("b", { text: title }), h("span", { class: "grow" }), plexLink(audit, d.plex_key, "Open in Plex")),
       h("div", { class: "tablewrap" }, h("table", {},
         ...d.files.map((f) => h("tr", {},
-          h("td", { class: "path", text: rel(f.file) }),
+          h("td", { class: "path" }, rel(f.file), facts(f) && h("div", { class: "file-line muted", text: facts(f) })),
           h("td", { text: human(f.size) }),
           h("td", {}, f.converted ? h("span", { class: "chip ok", text: "-noidea" }) : h("span", { class: "chip", text: "not converted" })),
           h("td", {}, h("button", { class: "plain small", text: "Keep this one", onclick: async () => {
