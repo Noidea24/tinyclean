@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.4"
+VERSION = "8.4.1"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1779,6 +1779,28 @@ def multi_episode_name(name):
     return f"S{r[0]:02d}E{r[1]:02d}-E{r[2]:02d}" if r else None
 
 
+PLACEHOLDER_TITLE = re.compile(r"(?i)^\s*(episode|ep\.?|chapter|part)\s*#?\d+\s*$")
+CODE_IN_NAME = re.compile(r"(?i)(?<![a-z0-9])s\d{1,4}[ ._-]*e\d{1,4}(?:-?e?\d{1,4})?|(?<!\d)\d{1,2}x\d{2,3}(?!\d)")
+
+
+def is_placeholder_title(title):
+    """Plex's stand-in when it has no real title: 'Episode 5'."""
+    return not title or bool(PLACEHOLDER_TITLE.match(str(title)))
+
+
+def title_from_name(name):
+    """The title written after the episode code in a file name, or None:
+    's2014e05 - Too Many Cooks-noidea.mkv' -> 'Too Many Cooks'."""
+    stem = strip_suffix(name) if name.lower().endswith(".mkv") else Path(name).stem
+    m = CODE_IN_NAME.search(stem)
+    if not m:
+        return None
+    rest = re.sub(r"\[[^\]]*\]", " ", stem[m.end():])
+    rest = re.sub(r"(?i)[ ._-]+(hevc|x26[45]|h\.?26[45]|webdl|web-dl|webrip|bluray|hdtv|\d{3,4}p)\b.*$", "", rest)
+    rest = rest.strip(" .-_")
+    return rest or None
+
+
 def as_multi_episode(values, rng):
     """Template values for a file holding episodes first..last: S01E01-E02, no episode title
     (one title would be wrong for the other episode)."""
@@ -1812,6 +1834,8 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                 continue
             if rng:
                 e = {**e, "values": as_multi_episode(e["values"], rng)}
+            elif is_placeholder_title(e["values"].get("episode_title")):
+                e = {**e, "values": {**e["values"], "episode_title": title_from_name(f.name)}}
         new = target_for(e, mode, templates, new_root_suffix)
         if new == f:
             unchanged += 1

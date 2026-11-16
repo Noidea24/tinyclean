@@ -565,3 +565,18 @@ def test_delete_removes_the_picked_video_and_its_subtitles_only(tc, lib, tmp_pat
     assert str(lib["heat"]) in log and str(sub) in log
     with pytest.raises(SystemExit, match="Not a video"):
         tc.delete_files([str(keep)], tmp_path / "state", yes=True)
+
+
+def test_placeholder_titles_from_plex_keep_the_file_names_title(tc, lib):
+    f = touch(lib["shows"] / "breaking bad" / "S1" / "s2014e05 - Too Many Cooks-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 9, "Episode 9", str(f)))
+    new = {it["old"]: it["new"] for it in plan(tc, lib, "rename")["items"]}[str(f)]
+    assert new.endswith("Breaking Bad (2008) - S01E09 - Too Many Cooks-noidea.mkv")
+
+
+def test_title_from_name(tc):
+    assert tc.title_from_name("s2014e05 - Too Many Cooks-noidea.mkv") == "Too Many Cooks"
+    assert tc.title_from_name("Show - S01E02 - Pilot [WEBDL-1080p][x265]-noidea.mkv") == "Pilot"
+    assert tc.title_from_name("60 Days In - S01e05 -hevc-noidea.mkv") is None
+    assert tc.title_from_name("No code here.mkv") is None
+    assert tc.is_placeholder_title("Episode 12") and not tc.is_placeholder_title("Episode IV: A New Hope")
