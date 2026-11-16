@@ -414,9 +414,45 @@ def status(cfg, jobs, started):
             "job": summary(running) if running else None}
 
 
+LEFT_FILE = "left-alone.json"
+
+
+def left_alone(cfg):
+    """Folders the person marked "Leave as is" on Needs you (unmatched in Plex on purpose)."""
+    try:
+        return set(json.loads((cfg["engine_state"] / LEFT_FILE).read_text()).get("unmatched", []))
+    except (OSError, ValueError, AttributeError):
+        return set()
+
+
+def set_left_alone(cfg, folder, leave):
+    if not isinstance(folder, str) or not folder or len(folder) > 4096:
+        raise BadRequest("give the folder")
+    if not any(folder == str(r) or folder.startswith(str(r).rstrip("/") + "/") for r in cfg["roots"]):
+        raise BadRequest("that folder is not in this worker's libraries")
+    folders = left_alone(cfg)
+    (folders.add if leave else folders.discard)(folder)
+    cfg["engine_state"].mkdir(parents=True, exist_ok=True)
+    f = cfg["engine_state"] / LEFT_FILE
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"unmatched": sorted(folders)}, indent=1))
+    tmp.replace(f)
+
+
+def read_audit(cfg):
+    """The last library check, with folders marked "Leave as is" moved out of the unmatched list."""
+    a = json.loads((cfg["engine_state"] / "audit.json").read_text())
+    keep = left_alone(cfg)
+    if keep and isinstance(a.get("unmatched"), list):
+        a["left_alone"] = [u for u in a["unmatched"] if u.get("folder") in keep]
+        a["unmatched"] = [u for u in a["unmatched"] if u.get("folder") not in keep]
+        a.setdefault("counts", {})["unmatched"] = len(a["unmatched"])
+    return a
+
+
 def audit_summary(cfg):
     try:
-        a = json.loads((cfg["engine_state"] / "audit.json").read_text())
+        a = read_audit(cfg)
         return {"created": a.get("created"), "counts": a.get("counts", {})}
     except (OSError, ValueError):
         return None
@@ -617,8 +653,10 @@ def make_handler(cfg, jobs, started):
                     f = cfg["engine_state"] / parts[1] / parts[2]
                     return self.send(200, f.read_bytes()) if f.is_file() else self.send(404, {"error": "not found"})
                 if parts == ["api", "audit"]:
-                    f = cfg["engine_state"] / "audit.json"
-                    return self.send(200, f.read_bytes()) if f.is_file() else self.send(404, {"error": "no audit yet"})
+                    try:
+                        return self.send(200, read_audit(cfg))
+                    except (OSError, ValueError):
+                        return self.send(404, {"error": "no audit yet"})
                 if parts == ["api", "update"]:
                     lr = latest_release(q.get("check") == "1")
                     return self.send(200, {"current": engine_version(cfg["engine"]), "latest": lr["tag"],
@@ -666,6 +704,12 @@ def make_handler(cfg, jobs, started):
                 except BadRequest as exc:
                     return self.send(409 if "running" in str(exc) else 400, {"error": str(exc)})
                 return self.send(202, {"ok": True, "message": "update requested; the agent restarts in a minute"})
+            if parts == ["api", "leave"]:
+                try:
+                    set_left_alone(cfg, body.get("folder"), body.get("leave", True) is not False)
+                except BadRequest as exc:
+                    return self.send(400, {"error": str(exc)})
+                return self.send(200, {"left_alone": sorted(left_alone(cfg))})
             if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "stop":
                 job = jobs.stop(parts[2], after_current=bool(body.get("after_current")))
                 return self.send(200, summary(job)) if job else self.send(404, {"error": "no such job"})

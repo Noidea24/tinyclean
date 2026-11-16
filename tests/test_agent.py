@@ -306,3 +306,20 @@ def test_update_is_only_a_request_for_the_root_service(server, tmp_path, monkeyp
     (upd / "update-result.json").write_text('{"state": "ok", "tag": "v8.4"}')
     _, s = call(f"{url}/api/status")
     assert s["update"]["pending"] and s["update"]["last"]["state"] == "ok"
+
+
+def test_leave_as_is_hides_an_unmatched_folder_until_undone(server, cfg, library):
+    url, _ = server()
+    folder = str(library.resolve() / "Episodes" / "Fox Kids")
+    cfg["engine_state"].mkdir(parents=True, exist_ok=True)
+    (cfg["engine_state"] / "audit.json").write_text(json.dumps(
+        {"created": 1, "unmatched": [{"folder": folder, "files": 3}], "counts": {"unmatched": 1, "duplicates": 0}}))
+    assert call(f"{url}/api/leave", {"folder": "/etc"})[0] == 400
+    assert call(f"{url}/api/leave", {"folder": folder})[0] == 200
+    _, a = call(f"{url}/api/audit")
+    assert a["unmatched"] == [] and a["left_alone"][0]["folder"] == folder and a["counts"]["unmatched"] == 0
+    _, st = call(f"{url}/api/status")
+    assert st["audit"]["counts"]["unmatched"] == 0
+    assert call(f"{url}/api/leave", {"folder": folder, "leave": False})[0] == 200
+    _, a = call(f"{url}/api/audit")
+    assert a["unmatched"][0]["folder"] == folder

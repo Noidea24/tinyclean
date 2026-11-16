@@ -724,11 +724,22 @@ async function viewNeeds(v) {
   }
   v.append(dsec);
 
+  const leave = async (folder, yes) => {
+    try { await agentApi(w.name, "leave", { folder, leave: yes }); route(); }
+    catch (e) { alert(e.message); }
+  };
   const usec = h("section", {}, h("h2", { text: `Not matched in Plex (${audit.unmatched.length})` }),
-    h("p", { class: "muted", text: "Fix Match in Plex (… menu, Fix Match), then check again. Until then these are left as they are." }));
+    h("p", { class: "muted", text: "Fix Match in Plex (… menu, Fix Match), then check again. If Plex has no match at all (TV recordings, shows it doesn't know), press Leave as is: the folder stays in your library as it is, and stops counting here. Until then these are left as they are." }));
   if (audit.unmatched.length) usec.append(h("div", { class: "tablewrap" }, h("table", {},
     ...audit.unmatched.map((u) => h("tr", {}, h("td", { class: "path", text: u.folder.split("/").pop() }),
-      h("td", { text: `${u.files} file(s)` }), h("td", {}, plexLink(audit, u.plex_key, "Fix in Plex") || ""))))));
+      h("td", { text: `${u.files} file(s)` }), h("td", {}, plexLink(audit, u.plex_key, "Fix in Plex") || ""),
+      h("td", {}, h("button", { class: "plain small", text: "Leave as is", onclick: () => leave(u.folder, true) })))))));
+  const kept = audit.left_alone || [];
+  if (kept.length) usec.append(h("details", { class: "fold" }, h("summary", { text: `Left as is (${kept.length})` }),
+    h("div", { class: "tablewrap" }, h("table", {},
+      ...kept.map((u) => h("tr", {}, h("td", { class: "path", text: u.folder.split("/").pop() }),
+        h("td", { text: `${u.files} file(s)` }),
+        h("td", {}, h("button", { class: "plain small", text: "Undo", onclick: () => leave(u.folder, false) }))))))));
   v.append(usec);
 
   const order = audit.order || [];
