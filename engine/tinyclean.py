@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.8"
+VERSION = "8.5.9"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1060,7 +1060,10 @@ def check_pair(cfg, o, c):
         problems.append(f"length differs ({mmss(a['dur'])} vs {mmss(b['dur'])})")
     if not b["w"]:
         problems.append("no video in copy")
-    if b["w"] > 1920 or b["h"] > 1080:
+    # 1080p video is often stored as 1088 lines (padded to whole 16-pixel blocks): a copy that keeps the
+    # original's own size within that padding is fine.
+    padded = b["w"] <= 1920 and b["h"] <= 1088 and b["w"] <= a["w"] and b["h"] <= a["h"]
+    if (b["w"] > 1920 or b["h"] > 1080) and not padded:
         problems.append("copy is bigger than 1080p (made by an old version?)")
     if a["audio_n"] and not b["audio_n"]:
         problems.append("copy has no audio")

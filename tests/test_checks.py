@@ -109,3 +109,15 @@ def test_memory_guard_can_be_turned_off(tc, monkeypatch):
 def test_mem_available_reads_meminfo(tc):
     if os.path.exists("/proc/meminfo"):
         assert tc.mem_available_mb() > 0
+
+
+def test_a_1088_line_copy_of_a_1088_line_original_passes(tc, cfg, monkeypatch):
+    """1080p stored as 1088 lines (No Game No Life specials): not "bigger than 1080p"."""
+    def facts(w, h):
+        return {"dur": 151.0, "video": f"h264 {w}x{h}", "w": w, "h": h, "hdr": False, "audio": "jpn 2ch",
+                "audio_n": 1, "max_ch": 2, "subs": 1}
+    sizes = {"orig": facts(1920, 1088), "copy": facts(1920, 1088), "small": facts(1920, 1080), "big": facts(3840, 2160)}
+    monkeypatch.setattr(tc, "summarize", lambda c, p: sizes[p])
+    assert not any("bigger" in p for p in tc.check_pair(cfg, "orig", "copy")[0])
+    assert any("bigger" in p for p in tc.check_pair(cfg, "small", "copy")[0])
+    assert any("bigger" in p for p in tc.check_pair(cfg, "big", "big")[0])
