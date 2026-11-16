@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.3"
+VERSION = "8.5.4"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1504,7 +1504,7 @@ def describe(plan):
         lines.append(f"  audio : {a['why']}{' (default)' if a['default'] and len(plan['audio']) > 1 else ''}")
     kept = ", ".join(f"{lang_of(s) or 'untagged'}/{s.get('codec_name')}{' forced' if disp(s, 'forced') else ''}"
                      for s in plan["subs"]) or "-"
-    lines.append(f"  subs  : keep {len(plan['subs'])} [{kept}], drop {plan['subs_dropped']} ({plan['subs_why']})")
+    lines.append(f"  subs  : keep {len(plan['subs'])} {plan['subs_why']} [{kept}], drop {plan['subs_dropped']} other(s)")
     return "\n".join(lines)
 
 
