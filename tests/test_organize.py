@@ -867,3 +867,39 @@ def test_left_alone_folders_are_never_touched(tc, lib, tmp_path):
     assert not [it for it in p["items"] if "breaking bad" in it["old"]]
     assert "left as is" in dict(p["skipped"])[str(lib["ep1"])]
     assert [it for it in p["items"] if it["old"] == str(lib["matrix"])]
+
+
+def test_a_two_segment_name_is_never_cut_down_to_one_title(tc, lib):
+    """Rocket Power: 'New Squid On The Block - Down The Drain' at S01E01 holds Plex's E01 and E02."""
+    d = lib["shows"] / "breaking bad" / "S1"
+    f = touch(d / "s01e01 - New Squid On The Block - Down The Drain-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 1, "New Squid on the Block", str(f)))
+    p = plan(tc, lib, "rename")
+    # Plex's E02 title is unknown here: naming it after E01 alone would hide Down the Drain
+    assert "holds two titles" in dict(p["skipped"])[str(f)]
+    g = touch(d / "s01e02 - Something Else Entirely-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 2, "Down the Drain", str(g)))
+    p = plan(tc, lib, "rename")
+    # now E02 is known, but another file keeps it: no stacking, both stay
+    assert "new duplicate" in dict(p["skipped"])[str(f)]
+
+
+def test_one_title_with_a_dash_that_is_plexs_title_is_still_renamed(tc, lib):
+    f = touch(lib["shows"] / "breaking bad" / "S1" / "s01e09 - Dial M for Monkey - Barbequor-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 9, "Dial M for Monkey: Barbequor", str(f)))
+    assert [it for it in plan(tc, lib, "rename")["items"] if it["old"] == str(f)]
+
+
+def test_a_cancelled_move_still_blocks_its_old_number(tc, lib):
+    """A wants E03 (held by B); B wants E05, held by C who stays. B is cancelled and keeps E03,
+    so A must be cancelled too, or A and B would share E03."""
+    d = lib["shows"] / "breaking bad" / "S1"
+    a = touch(d / "s01e02 - Bravo Title-noidea.mkv")
+    b = touch(d / "s01e03 - Charlie Title-noidea.mkv")
+    c = touch(d / "s01e05 - Zulu Nothing-noidea.mkv")
+    lib["plex"].episodes += [episode("10", 1, 2, "Alpha Title", str(a)), episode("10", 1, 3, "Bravo Title", str(b)),
+                             episode("10", 1, 5, "Charlie Title", str(c))]
+    p = plan(tc, lib, "rename")
+    moved = {it["old"] for it in p["items"]}
+    assert str(a) not in moved and str(b) not in moved
+    assert "new duplicate" in dict(p["skipped"])[str(a)]

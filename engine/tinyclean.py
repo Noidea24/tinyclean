@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.11"
+VERSION = "8.5.12"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1983,11 +1983,19 @@ def labels_agree(mine, builtin):
     return len(a) >= 5 and a in b
 
 
+def two_titles(mine):
+    """The two segment titles in a name like 'Secret Spot - Ice Queens' ('A & B', 'A / B'), or None."""
+    parts = [p.strip(" _") for p in re.split(r"\s+(?:-|&|/)\s+", mine or "")]
+    if len(parts) != 2 or not all(re.search(r"[a-z]{3}", norm_title(p)) for p in parts):
+        return None
+    return parts
+
+
 def two_part_hit(index, e, mine):
     """A file named for two segments ('Secret Spot - Ice Queens', 'A & B', 'A / B') whose halves are
     Plex's episodes next to each other in one season: (season, first, last, "A & B"), else None."""
-    parts = [p.strip() for p in re.split(r"\s+(?:-|&|/)\s+", mine)]
-    if len(parts) != 2 or min(len(p) for p in parts) < 3:
+    parts = two_titles(mine)
+    if not parts:
         return None
     hits = [title_hit(index, e, p) for p in parts]
     if not all(hits) or hits[0][0] != hits[1][0]:
@@ -2047,11 +2055,18 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                 e = {**e, "values": {**e["values"], "episode_title": title_from_name(f.name)}}
             else:
                 mine, plex_title = title_from_name(f.name), e["values"].get("episode_title")
-                if mine and not titles_agree(mine, plex_title):
-                    v = e["values"]
-                    code = f"S{int(v.get('season') or 0):02d}E{int(v.get('episode') or 0):02d}"
-                    hit = title_hit(index, e, mine)
-                    pair = None if hit else two_part_hit(index, e, mine)
+                v = e["values"]
+                code = f"S{int(v.get('season') or 0):02d}E{int(v.get('episode') or 0):02d}"
+                pair = two_part_hit(index, e, mine) if mine else None
+                if (mine and not pair and two_titles(mine) and titles_agree(mine, plex_title)
+                        and norm_title(mine) != norm_title(plex_title)):
+                    # 'A - B' where Plex has only A here: naming it A would hide B
+                    skips.append((str(f), f"the file name holds two titles (\u201c{mine}\u201d) but Plex has only one "
+                                          f"of them at {code} (\u201c{plex_title}\u201d), and naming it after one "
+                                          "would hide the other: check the episode order or the file name"))
+                    continue
+                if mine and (pair or not titles_agree(mine, plex_title)):
+                    hit = None if pair else title_hit(index, e, mine)
                     inside = builtin_title(ffprobe_bin, f) if (hit or pair) else None
                     if (hit or pair) and inside and not labels_agree(mine, inside):
                         skips.append((str(f), f"labels disagree: the file name says \u201c{mine}\u201d but the title "
@@ -2066,7 +2081,10 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                         e = {**e, "values": {**v, "season": s, "episode": n, "episode_title": t}}
                     elif pair:
                         s, a, b, t = pair
-                        note = (f"renumbered: the file holds two of Plex's episodes, S{int(s or 0):02d}E{a:02d} and "
+                        same = (s, a) == (v.get("season"), v.get("episode"))
+                        note = (f"two episodes in one file: S{int(s or 0):02d}E{a:02d}-E{b:02d} (\u201c{t}\u201d)"
+                                if same else
+                                f"renumbered: the file holds two of Plex's episodes, S{int(s or 0):02d}E{a:02d} and "
                                 f"E{b:02d} (\u201c{t}\u201d), not {code} \u201c{plex_title}\u201d")
                         moves[str(f)] = [(e.get("section"), v.get("tvdb") or v.get("show"), s, n) for n in (a, b)]
                         e = {**e, "values": {**as_multi_episode(v, (s, a, b)), "episode_title": t}}
@@ -2093,20 +2111,28 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                       "section": e.get("section"), "note": note,
                       "size": st.st_size, "mtime": st.st_mtime_ns, "sidecars": sides})
     # A renumbered file must not land on an episode another file keeps: that would make a new duplicate.
+    # A cancelled move keeps the file on its old number, which can block another move: repeat until settled.
     if moves:
-        held = {}
-        for e in entries:
-            if e["kind"] != "episode":
-                continue
-            v, f = e["values"], str(e["file"])
-            show = (e.get("section"), v.get("tvdb") or v.get("show"))
-            rng = e.get("multi") or multi_episode_range(e["file"].name)
-            nums = [m[2:] for m in moves[f]] if f in moves else (
-                [(rng[0], n) for n in range(rng[1], rng[2] + 1)] if rng else [(v.get("season"), v.get("episode"))])
-            for s, n in nums:
-                held.setdefault((*show, s, n), []).append(f)
-        clash = {f: [m for m in ms if len(held.get(m, [])) > 1] for f, ms in moves.items()}
-        clash = {f: ms for f, ms in clash.items() if ms}
+        active, clash = dict(moves), {}
+        while True:
+            held = {}
+            for e in entries:
+                if e["kind"] != "episode":
+                    continue
+                v, f = e["values"], str(e["file"])
+                show = (e.get("section"), v.get("tvdb") or v.get("show"))
+                rng = e.get("multi") or multi_episode_range(e["file"].name)
+                nums = [m[2:] for m in active[f]] if f in active else (
+                    [(rng[0], n) for n in range(rng[1], rng[2] + 1)] if rng else [(v.get("season"), v.get("episode"))])
+                for s, n in nums:
+                    held.setdefault((*show, s, n), []).append(f)
+            now = {f: [m for m in ms if len(held.get(m, [])) > 1] for f, ms in active.items()}
+            now = {f: ms for f, ms in now.items() if ms}
+            if not now:
+                break
+            clash.update(now)
+            for f in now:
+                del active[f]
         for it in [it for it in items if it["old"] in clash]:
             s, n = clash[it["old"]][0][2:]
             skips.append((it["old"], f"not renumbered: another file already holds S{int(s or 0):02d}E{int(n):02d}, "
