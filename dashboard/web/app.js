@@ -706,6 +706,18 @@ async function viewNeeds(v) {
       h("td", { text: `${u.files} file(s)` }), h("td", {}, plexLink(audit, u.plex_key, "Fix in Plex") || ""))))));
   v.append(usec);
 
+  const order = audit.order || [];
+  const osec = h("section", {}, h("h2", { text: `Episode order differs from Plex (${order.length} shows)` }),
+    h("p", { class: "muted", text: "The titles in these file names belong to other episode numbers in Plex, so Plex shows the wrong episode for them, and Organize leaves them as they are. To fix a show: open it in Plex, Edit, Advanced, Episode ordering, try TheTVDB (DVD) or TheMovieDB, save, then Check again. Shows only a few files out of order are renumbered by Organize itself and are not listed." }));
+  if (order.length) osec.append(h("div", { class: "tablewrap" }, h("table", {},
+    ...order.map((o) => h("tr", {},
+      h("td", { class: "path" }, h("details", {},
+        h("summary", { text: `${o.folder.split("/").pop()}: ${o.files} file(s)` }),
+        ...o.examples.map((x) => h("div", { class: "file-line", text: `${x.code}: your file says “${x.mine}”, Plex says “${x.plex}”` })))),
+      h("td", {}, plexLink(audit, o.plex_key, "Open in Plex") || ""))))));
+  else osec.append(h("div", { class: "muted", text: "None." }));
+  v.append(osec);
+
   const wsec = h("section", {}, h("h2", { text: `Clean copies waiting (${audit.waiting.length} folders)` }));
   if (audit.waiting.length) wsec.append(h("div", { class: "tablewrap" }, h("table", {},
     ...audit.waiting.map((x) => h("tr", {}, h("td", { class: "path", text: rel(x.folder) }), h("td", { text: `${x.files} file(s)` }),

@@ -645,3 +645,12 @@ def test_more_release_junk_is_not_a_title(tc):
     assert tc.titles_agree("Redemption Part I", "Redemption (1)")
     assert tc.titles_agree("The Origin of Donnie, Part Three", "The Origin of Donnie (3)")
     assert tc.titles_agree("Dirty Pranking Number 2", "Dirty Pranking No. 2")
+
+
+def test_audit_lists_shows_whose_episode_order_differs(tc, lib, tmp_path, monkeypatch):
+    for n, (mine, theirs) in enumerate([("Alpha", "Gamma"), ("Beta", "Delta"), ("Gamma", "Epsilon")], start=5):
+        f = touch(lib["shows"] / "breaking bad" / "S3" / f"bb s03e{n:02d} - {mine}-noidea.mkv")
+        lib["plex"].episodes.append(episode("10", 3, n, theirs, str(f)))
+    a = run_audit(tc, lib, tmp_path, monkeypatch)
+    assert [(o["folder"].split("/")[-1], o["files"]) for o in a["order"]] == [("breaking bad", 2)]
+    assert sorted(x["plex"] for x in a["order"][0]["examples"]) == ["Delta", "Gamma"]

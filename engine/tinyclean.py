@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5"
+VERSION = "8.5.1"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -2486,6 +2486,33 @@ def audit(args, state_dir):
             o = other.setdefault((folder_of(f), why), {"folder": folder_of(f), "why": why, "files": []})
             o["files"].append(f)
 
+    # Shows whose file names give other titles than Plex has for those numbers: Plex shows the wrong
+    # episodes for them, and the organizer leaves them alone until the order is fixed.
+    titles = {}
+    for e in entries:
+        v = e["values"]
+        if e["kind"] == "episode" and not e.get("multi") and not is_placeholder_title(v.get("episode_title")):
+            titles.setdefault((e.get("section"), v.get("tvdb") or v.get("show"), v.get("season")), []).append(
+                v.get("episode_title"))
+    order = {}
+    for e in entries:
+        f, v = e["file"], e["values"]
+        if e["kind"] != "episode" or e.get("multi") or not in_scope(str(f)) or multi_episode_range(f.name):
+            continue
+        mine, theirs = title_from_name(f.name), v.get("episode_title")
+        if not mine or is_placeholder_title(theirs) or titles_agree(mine, theirs):
+            continue
+        season = titles.get((e.get("section"), v.get("tvdb") or v.get("show"), v.get("season")), [])
+        if len([t for t in season if titles_same(mine, t)]) == 1:
+            continue                    # the organizer renumbers this one by itself
+        key = folder_of(str(f))
+        o = order.setdefault(key, {"folder": key, "title": v.get("show"), "files": 0, "examples": [],
+                                   "plex_key": info.get(str(f), {}).get("key")})
+        o["files"] += 1
+        if len(o["examples"]) < 3:
+            o["examples"].append({"file": f.name, "mine": mine, "plex": theirs,
+                                  "code": f"S{int(v.get('season') or 0):02d}E{int(v.get('episode') or 0):02d}"})
+
     waiting = {}
     for e in entries:
         f = e["file"]
@@ -2499,14 +2526,16 @@ def audit(args, state_dir):
               "unmatched": sorted(unmatched.values(), key=lambda u: u["folder"].lower()),
               "waiting": [{"folder": k, "files": v} for k, v in sorted(waiting.items())],
               "failed": failed,
+              "order": sorted(order.values(), key=lambda o: o["folder"].lower()),
               "other": sorted(other.values(), key=lambda o: o["folder"].lower())}
-    result["counts"] = {k: len(result[k]) for k in ("duplicates", "unmatched", "waiting", "failed", "other")}
+    result["counts"] = {k: len(result[k]) for k in ("duplicates", "unmatched", "order", "waiting", "failed", "other")}
     state_dir.mkdir(parents=True, exist_ok=True)
     tmp = state_dir / (AUDIT_FILE + ".tmp")
     tmp.write_text(json.dumps(result, indent=1))
     tmp.replace(state_dir / AUDIT_FILE)
     c = result["counts"]
     print(f"\nDuplicates: {c['duplicates']}   Not matched in Plex: {c['unmatched']} folder(s)   "
+          f"Episode order differs from Plex: {c['order']} show(s)   "
           f"Clean copies waiting: {c['waiting']} folder(s)   Failed conversions: {c['failed']}   "
           f"Other: {c['other']}")
     for d in duplicates[:50]:
