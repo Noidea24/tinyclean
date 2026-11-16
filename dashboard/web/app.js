@@ -121,7 +121,7 @@ async function loadAgents() {
     S.agents = data.agents; S.dashboard = data.dashboard || {};
   } catch (e) { /* keep the last answer */ }
   const audit = (S.agents.find((a) => a.online && a.status.audit) || { status: {} }).status.audit;
-  const n = audit ? Object.entries(audit.counts || {}).filter(([k]) => k !== "other").reduce((s, [, v]) => s + v, 0) : 0;
+  const n = audit ? Object.entries(audit.counts || {}).filter(([k]) => k !== "other" && k !== "order").reduce((s, [, v]) => s + v, 0) : 0;
   const badge = $("needcount");
   if (badge) { badge.textContent = n; badge.classList.toggle("hide", !n); }
   return S.agents;
@@ -722,7 +722,7 @@ async function viewNeeds(v) {
   v.append(usec);
 
   const order = audit.order || [];
-  const osec = h("section", {}, h("h2", { text: `Episode order differs from Plex (${order.length} shows)` }),
+  const osec = h("section", {}, h("h2", { text: `Episode order differs from Plex (${order.length} shows, not counted in the badge: fix in Plex when convenient)` }),
     h("p", { class: "muted", text: "The titles in these file names belong to other episode numbers in Plex, so Plex shows the wrong episode for them, and Organize leaves them as they are. To fix a show: open it in Plex, Edit, Advanced, Episode ordering, try TheTVDB (DVD) or TheMovieDB, save, then Check again. Shows only a few files out of order are renumbered by Organize itself and are not listed." }));
   if (order.length) osec.append(h("div", { class: "tablewrap" }, h("table", {},
     ...order.map((o) => h("tr", {},
@@ -743,6 +743,7 @@ async function viewNeeds(v) {
   const fsec = h("section", {}, h("h2", { text: `Failed conversions (${audit.failed.length})` }));
   if (audit.failed.length) fsec.append(h("div", { class: "tablewrap" }, h("table", {},
     ...audit.failed.map((r) => h("tr", {}, h("td", { class: "path", text: rel(r.file) }),
+      h("td", { class: "nowrap muted", text: r.time ? "tried " + r.time.slice(0, 16) : "" }),
       h("td", { class: r.redownload ? "warn" : "", text: (r.redownload ? "Re-download: " : "") + r.notes }))))),
     h("div", { class: "row" }, h("a", { href: "#/failures", text: "Retry from Failures" })));
   else fsec.append(h("div", { class: "muted", text: "None." }));

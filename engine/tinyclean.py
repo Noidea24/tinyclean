@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.2"
+VERSION = "8.5.3"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -2557,7 +2557,9 @@ AUDIT_FILE = "audit.json"
 
 
 def ledger_failures(state_dir):
-    """Files whose latest attempt failed, from the ledger: [{file, time, notes, redownload}]."""
+    """Files whose latest attempt failed, from the ledger: [{file, time, notes, redownload}]. A file that
+    is no longer the one that failed (another size, e.g. downloaded again under the same name) is left out:
+    it gets converted on the next run."""
     import csv
     latest = {}
     try:
@@ -2569,6 +2571,11 @@ def ledger_failures(state_dir):
     out = []
     for path, row in latest.items():
         if row.get("result") == "failed" and path and Path(path).exists():
+            try:
+                if row.get("orig_bytes") and Path(path).stat().st_size != int(row["orig_bytes"]):
+                    continue
+            except (OSError, ValueError):
+                pass
             notes = row.get("notes") or ""
             out.append({"file": path, "time": row.get("time", ""), "notes": notes,
                         "redownload": bool(re.search(r"damaged or incomplete|re-download", notes, re.I))})

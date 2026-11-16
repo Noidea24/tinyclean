@@ -558,6 +558,18 @@ def test_audit_reads_failures_from_the_ledger(tc, lib, tmp_path, monkeypatch):
     assert [(r["file"], r["redownload"]) for r in a["failed"]] == [(str(lib["heat"]), True)]
 
 
+def test_a_file_downloaded_again_is_no_longer_listed_as_failed(tc, lib, tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    size = lib["heat"].stat().st_size
+    (state / "ledger.csv").write_text(
+        "time,file,result,orig_bytes,new_bytes,seconds,notes\n"
+        f"2026-11-01 10:00,{lib['heat']},failed,{size},,,duration mismatch\n"
+        f"2026-11-01 10:00,{lib['matrix']},failed,{size + 999},,,duration mismatch\n")
+    a = run_audit(tc, lib, tmp_path, monkeypatch)
+    assert [r["file"] for r in a["failed"]] == [str(lib["heat"])]
+
+
 def test_delete_removes_the_picked_video_and_its_subtitles_only(tc, lib, tmp_path):
     sub = touch(lib["heat"].with_suffix(".en.srt"), b"srt")
     keep = touch(lib["heat"].parent / "poster.jpg", b"jpg")
