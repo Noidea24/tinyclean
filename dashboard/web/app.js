@@ -489,9 +489,11 @@ async function viewJob(v, agent, id) {
   await loadAgents();
   const title = h("h3", {}), state = h("div", { class: "muted" }), prog = h("div", {});
   const out = h("pre", {});
+  const outSummary = h("summary", { text: "Output" });
+  const outBox = h("details", { open: true }, outSummary, out);
   const actions = h("div", { class: "row" });
   const after = h("div", {});
-  v.append(h("section", {}, h("div", { class: "head" }, title), state, prog, actions, out), after);
+  v.append(h("section", {}, h("div", { class: "head" }, title), state, prog, actions, outBox), after);
   let since = 0, lines = [], shownAfter = false, current = null;
   const download = h("button", { class: "plain", text: "Download .txt", onclick: () => {
     if (!current) return;
@@ -534,7 +536,13 @@ async function viewJob(v, agent, id) {
     current = job;
     actions.replaceChildren(...(live ? [job.kind === "convert" && stopAfter, stopNow] : []).filter(Boolean), download);
     if (live) later(poll, 1500);
-    else if (!shownAfter) { shownAfter = true; out.scrollTop = out.scrollHeight; await afterJob(after, agent, job, lines); }
+    else if (!shownAfter) {
+      shownAfter = true;
+      out.scrollTop = out.scrollHeight;
+      outSummary.textContent = `Full output (${lines.length} lines)`;
+      if (lines.length > 40 && ["organize", "audit", "check", "status"].includes(job.kind)) outBox.open = false;
+      await afterJob(after, agent, job, lines);
+    }
   }
   poll();
 }
@@ -563,19 +571,32 @@ async function afterJob(box, agent, job, lines) {
     const name = (text.match(/plan-[\d-]+\.json/) || [])[0];
     if (!name) return;
     const plan = await agentApi(agent, "plans/" + name);
-    box.append(planTable(plan));
+    const renumbered = plan.items.filter((it) => it.note).length;
+    const leftovers = (plan.clean_leftovers || []).length;
+    const summary = h("section", {}, h("h2", { text: "Plan" }),
+      h("div", { class: "chips" },
+        h("span", { class: "chip ok", text: `${plan.items.length} video(s) to ${plan.mode === "newtree" ? "link" : "rename/move"}` }),
+        (plan.extras || []).length > 0 && h("span", { class: "chip", text: `${plan.extras.length} other file(s) moving along` }),
+        renumbered > 0 && h("span", { class: "chip bad", text: `${renumbered} renumbered by title` }),
+        leftovers > 0 && h("span", { class: "chip", text: `${leftovers} leftover folder(s) removed` }),
+        h("span", { class: "chip", text: `${plan.unchanged} already right` }),
+        h("span", { class: "chip", text: `${plan.skipped.length} skipped` })),
+      h("p", { class: "muted", text: "Open the lists below to check them, or download the .txt above." }));
+    box.append(summary);
     if (plan.items.length) {
-      box.append(h("section", {}, h("h2", { text: "Apply" }),
-        h("p", { class: "muted", text: "Applies exactly the plan above, on files that have not changed since. Every applied run can be undone from Organize." }),
+      summary.append(h("p", { class: "muted", text: "Apply carries out exactly this plan, on files that have not changed since. Every applied run can be undone from Organize." }));
+      summary.append(h("div", { class: "row" },
         h("button", { class: "danger", text: `Apply ${plan.items.length} change(s)...`, onclick: async () => {
           const verb = { rename: "renamed", restructure: "renamed and moved", newtree: "hard-linked into a new tree" }[plan.mode];
           const more = (plan.extras || []).length;
           if (!await confirmBox("Apply this plan?", [`${plan.items.length} video(s) will be ${verb}, with their subtitle files` +
             (more ? ` and ${more} other file(s) from their folders.` : "."),
-            "Nothing is deleted. Undo puts the names back."], "apply", "Apply")) return;
+            "No video is deleted" + (leftovers ? "; only the leftover folders listed are removed." : ".") +
+            " Undo puts the names back."], "apply", "Apply")) return;
           try { await startJob(agent, "apply_plan", { plan: name, confirm: true }); } catch (e) { alert(e.message); }
         } })));
     }
+    box.append(planTable(plan));
   }
   if (job.kind === "apply_plan") {
     const name = (text.match(/undo-[\d-]+\.json/) || [])[0];
@@ -589,24 +610,27 @@ async function afterJob(box, agent, job, lines) {
 
 function planTable(plan) {
   const rel = (p, root) => p.startsWith(root + "/") ? p.slice(root.length + 1) : p;
-  const sec = h("section", {}, h("h2", { text: `Plan: ${plan.items.length} change(s), ${plan.unchanged} already right, ${plan.skipped.length} skipped` }));
-  if (plan.items.length) sec.append(h("div", { class: "tablewrap" }, h("table", {},
+  const sec = h("section", {});
+  const fold = (label, ...kids) => h("details", { class: "fold" }, h("summary", { text: label }), ...kids);
+  if (plan.items.length) sec.append(fold(`Changes (${plan.items.length})`, h("div", { class: "tablewrap" }, h("table", {},
     h("tr", {}, h("th", { text: "Now" }), h("th", { text: "Becomes" })),
     ...plan.items.map((it) => h("tr", {}, h("td", { class: "path", text: rel(it.old, it.root) }),
       h("td", { class: "path" }, rel(it.new, plan.mode === "newtree" ? it.root.replace(/\/[^/]+$/, "") : it.root),
         it.note && h("div", { class: "file-line warn", text: it.note }),
-        ...it.sidecars.map((s) => h("div", { class: "file-line", text: "+ " + s[1].split("/").pop() }))))))));
+        ...it.sidecars.map((s) => h("div", { class: "file-line", text: "+ " + s[1].split("/").pop() })))))))));
+  const notes = plan.items.filter((it) => it.note);
+  if (notes.length) sec.append(fold(`Renumbered by title (${notes.length})`,
+    ...notes.map((it) => h("div", { class: "file-line warn", text: `${it.old.split("/").pop()}: ${it.note}` }))));
   const extras = plan.extras || [];
-  if (extras.length) sec.append(h("h2", { text: `Other files moving with them (${extras.length}), so the old folders end up empty`, style: "margin-top:16px" }),
+  if (extras.length) sec.append(fold(`Other files moving with them (${extras.length}), so the old folders end up empty`,
     h("div", { class: "tablewrap" }, h("table", {},
       h("tr", {}, h("th", { text: "Now" }), h("th", { text: "Becomes" })),
       ...extras.map((x) => h("tr", {}, h("td", { class: "path", text: rel(x.old, x.root) }),
-        h("td", { class: "path", text: rel(x.new, plan.mode === "newtree" ? x.root.replace(/\/[^/]+$/, "") : x.root) }))))));
+        h("td", { class: "path", text: rel(x.new, plan.mode === "newtree" ? x.root.replace(/\/[^/]+$/, "") : x.root) })))))));
   const leftovers = plan.clean_leftovers || [];
-  if (leftovers.length) sec.append(h("h2", { text: `Leftover folders that will be removed (${leftovers.length})`, style: "margin-top:16px" }),
+  if (leftovers.length) sec.append(fold(`Leftover folders that will be removed (${leftovers.length})`,
     h("p", { class: "muted", text: "Clean folders holding only tinyclean's own notes (no copies), and Synology @eaDir index folders for the old names (the NAS rebuilds them), so the old folders can go once their videos have moved." }),
-    h("details", {}, h("summary", { text: "Show them" }),
-      ...leftovers.map((c) => h("div", { class: "file-line", text: rel(c.dir, c.root) }))));
+    ...leftovers.map((c) => h("div", { class: "file-line", text: rel(c.dir, c.root) }))));
   if (plan.skipped.length) {
     const roots = (plan.roots || []).slice().sort((a, b) => b.length - a.length);
     const groups = new Map();
@@ -618,13 +642,13 @@ function planTable(plan) {
       if (!groups.has(key)) groups.set(key, { folder, why, paths: [] });
       groups.get(key).paths.push(path);
     }
-    sec.append(h("h2", { text: `Skipped (${plan.skipped.length})`, style: "margin-top:16px" }), h("div", { class: "tablewrap" }, h("table", {},
+    sec.append(fold(`Skipped (${plan.skipped.length})`, h("div", { class: "tablewrap" }, h("table", {},
       h("tr", {}, h("th", { text: "What" }), h("th", { text: "Why" })),
       ...[...groups.values()].map((g) => h("tr", {},
         h("td", { class: "path" }, g.paths.length === 1 ? g.paths[0] : h("details", {},
           h("summary", { text: `${g.folder.split("/").pop()}: ${g.paths.length} files` }),
           ...g.paths.map((p) => h("div", { class: "file-line", text: p.split("/").pop() })))),
-        h("td", { text: g.why }))))));
+        h("td", { text: g.why })))))));
   }
   return sec;
 }

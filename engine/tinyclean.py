@@ -1726,17 +1726,41 @@ def read_library(plex, mapped, ignore=(), info=None):
     return entries, skipped
 
 
-def sidecars(video):
-    """Subtitle and info files belonging to ``video``: same folder, its name then a dot."""
+ARTWORK_EXTS = {".jpg", ".jpeg", ".png", ".tbn", ".webp"}
+ARTWORK_TAGS = ("thumb", "poster", "fanart", "banner", "landscape", "clearart", "logo")
+
+
+def sidecar_parts(video):
+    """Files belonging to ``video``, as (file, the rest of its name after the video's name).
+    Subtitles and .nfo: '<video name>.en.srt'. Artwork: '<video name>.jpg' or '<video name>-thumb.jpg'.
+    The video's name is taken with or without its -noidea suffix (downloads name artwork after the
+    original file)."""
+    bases = sorted({video.stem, strip_suffix(video.name) if video.suffix.lower() == ".mkv" else video.stem},
+                   key=len, reverse=True)
     found = []
     try:
         for f in video.parent.iterdir():
-            if f != video and f.is_file() and f.name.startswith(video.stem + ".") \
-                    and f.suffix.lower() in SIDECAR_EXTS:
-                found.append(f)
+            if f == video or not f.is_file() or f.suffix.lower() in VIDEO_EXTS:
+                continue
+            for base in bases:
+                if not f.name.startswith(base):
+                    continue
+                rest = f.name[len(base):]
+                ext = f.suffix.lower()
+                if rest.startswith(".") and ext in SIDECAR_EXTS | ARTWORK_EXTS:
+                    found.append((f, rest))
+                    break
+                if ext in ARTWORK_EXTS and re.fullmatch(r"-(%s)\.\w+" % "|".join(ARTWORK_TAGS), rest, re.I):
+                    found.append((f, rest))
+                    break
     except OSError:
         pass
     return sorted(found)
+
+
+def sidecars(video):
+    """Subtitle, info and artwork files belonging to ``video`` (see sidecar_parts)."""
+    return [f for f, _ in sidecar_parts(video)]
 
 
 def target_for(entry, mode, templates, new_root_suffix="-new"):
@@ -1894,8 +1918,9 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
         items.append({"old": str(f), "new": str(new), "root": str(e["root"]), "group": e["group"],
                       "section": e.get("section"), "note": note,
                       "size": st.st_size, "mtime": st.st_mtime_ns,
-                      "sidecars": [[str(s), str(new.with_name(new.stem + s.name[len(f.stem):]))]
-                                   for s in sidecars(f)]})
+                      "sidecars": [[str(s), str(new.with_name(
+                                       (new.stem if not rest.startswith("-") else strip_suffix(new.name)) + rest))]
+                                   for s, rest in sidecar_parts(f)]})
     # Two changes aiming at one name, or a name already in use by another file: leave both alone.
     targets = {}
     for it in items:

@@ -616,3 +616,12 @@ def test_synology_eadir_folders_are_removed_not_moved(tc, lib, tmp_path):
 def test_an_eadir_with_someone_elses_file_is_kept(tc, lib):
     touch(lib["heat"].parent / "@eaDir" / "notes.txt", b"mine")
     assert not plan(tc, lib, "restructure")["clean_leftovers"]
+
+
+def test_artwork_named_after_the_original_download_is_renamed_with_its_video(tc, lib):
+    thumb = touch(lib["matrix"].with_name("The.Matrix.1999.1080p.BluRay-thumb.jpg"), b"jpg")
+    other = touch(lib["matrix"].with_name("folder.jpg"), b"jpg")
+    it = {i["old"]: i for i in plan(tc, lib, "rename")["items"]}[str(lib["matrix"])]
+    names = sorted(Path(n).name for _, n in it["sidecars"])
+    assert names == ["The Matrix (1999)-noidea.en.srt", "The Matrix (1999)-thumb.jpg"]
+    assert str(other) not in [o for o, _ in it["sidecars"]]

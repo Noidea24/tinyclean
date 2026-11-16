@@ -51,6 +51,11 @@ section, .card { background: var(--panel); border: 1px solid var(--line); border
 .dupe { border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin-top: 10px; }
 .dupe .head { margin-bottom: 4px; }
 details summary { cursor: pointer; }
+details.fold { border-top: 1px solid var(--line); padding: 10px 0 0; margin-top: 10px; }
+details.fold:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+details.fold > summary { font-weight: 600; font-size: 14px; }
+details.fold[open] > summary { margin-bottom: 8px; }
+section > details > summary { color: var(--muted); font-size: 13px; margin-top: 8px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--off); display: inline-block; }
 .dot.on { background: var(--accent); }
 .dot.busy { background: var(--warn); }
