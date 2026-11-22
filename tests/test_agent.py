@@ -154,6 +154,11 @@ def test_job_options_are_built_from_a_fixed_list(agent_mod, cfg, library):
                                             "dry_run": True}, cfg)
     assert argv == ["--profile", "live", "--jobs", "2", "--progress-lines", "--folders", "3", "--dry-run",
                     "--", film]
+    assert agent_mod.build_argv("convert", {"paths": [film], "profile": "auto"}, cfg)[:2] == ["--jobs", "1"]
+    with pytest.raises(agent_mod.BadRequest):
+        agent_mod.set_profiles(cfg, {"profiles": {film: "cartoon"}})
+    with pytest.raises(agent_mod.BadRequest):
+        agent_mod.set_profiles(cfg, {"profiles": {"/etc": "live"}})
     assert agent_mod.build_argv("check", {"paths": [film]}, cfg) == ["--check", "--", film]
     assert agent_mod.build_argv("apply_plan", {"plan": "latest", "confirm": True}, cfg) == \
         ["--apply-plan", "latest", "--yes", "--env-file", cfg["env_file"]]

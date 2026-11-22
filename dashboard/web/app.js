@@ -321,9 +321,48 @@ async function viewConvert(v) {
   const worker = workerSelect("convert");
   const picker = folderPicker(() => worker.value, { files: true, key: "convert" });
   worker.addEventListener("change", () => picker.reload());
-  const profile = segmented([["Live action", "live"], ["Animated", "animated"]], store("profile") || "live", (p) => store("profile", p));
+  const showsBox = h("div", { class: "shows" });
+  let shows = null;          // [{show, name, files, bytes, profile, choice}] once loaded for picker.value
+  let showsFor = "";
+  const profile = segmented([["Live action", "live"], ["Animated", "animated"], ["Per show", "auto"]],
+    store("profile") || "live", (p) => { store("profile", p); if (p !== "auto") showsBox.replaceChildren(); });
   const jobs = h("select", {}, ...[1, 2, 3, 4].map((n) => h("option", { value: n, text: String(n) })));
   jobs.value = store("jobs") || 1;
+
+  // Per show: list the shows in the folder, each with live/animated, like the old a/l letters.
+  const drawShows = () => {
+    const rows = shows.map((s) => {
+      const seg = segmented([["Live", "live"], ["Animated", "animated"]], s.choice, (v) => { s.choice = v; });
+      s.seg = seg;
+      return h("tr", {}, h("td", { class: "path", text: s.name }),
+        h("td", { class: "muted", text: `${s.files} file(s), ${human(s.bytes)}` }),
+        h("td", { class: s.profile ? "muted" : "warn", text: s.profile ? "saved" : "new" }), h("td", {}, seg));
+    });
+    const letters = h("input", { placeholder: "a = animated, l = live, e.g. alla", style: "width:240px", autocomplete: "off" });
+    const lmsg = h("span", { class: "muted" });
+    letters.addEventListener("input", () => {
+      const t = letters.value.replace(/[\s,]/g, "").toLowerCase();
+      if (/[^al]/.test(t)) { lmsg.textContent = "only a and l"; return; }
+      lmsg.textContent = `${t.length} of ${shows.length}`;
+      [...t].forEach((c, i) => { if (shows[i]) { shows[i].choice = c === "a" ? "animated" : "live";
+        for (const b of shows[i].seg.children) b.classList.toggle("on", (b.textContent === "Animated") === (c === "a")); } });
+    });
+    const all = (v) => { shows.forEach((s) => { s.choice = v; }); drawShows(); };
+    showsBox.replaceChildren(
+      h("p", { class: "muted", text: `${shows.length} show/movie folder(s) to convert. Pick each one, or type one letter per show in order. Your choices are saved and used again next time.` }),
+      h("div", { class: "row" }, letters, lmsg,
+        h("button", { class: "plain small", type: "button", text: "All live", onclick: () => all("live") }),
+        h("button", { class: "plain small", type: "button", text: "All animated", onclick: () => all("animated") })),
+      h("div", { class: "tablewrap" }, h("table", {}, ...rows)));
+  };
+  const loadShows = async () => {
+    showsBox.replaceChildren(h("div", { class: "muted", text: "Reading the folder..." }));
+    const res = await agentApi(worker.value, "shows", { paths: [picker.value] });
+    shows = res.shows.map((s) => ({ ...s, choice: s.profile || "live" }));
+    showsFor = worker.value + "|" + picker.value;
+    if (!shows.length) showsBox.replaceChildren(h("div", { class: "muted", text: "Nothing to convert in that folder." }));
+    else drawShows();
+  };
   const folders = segmented([["3", 3], ["5", 5], ["10", 10], ["All", 0]], 0);
   const custom = h("input", { type: "number", min: 0, placeholder: "or type a number", style: "width:150px" });
   const dry = h("input", { type: "checkbox", checked: true });
@@ -335,6 +374,15 @@ async function viewConvert(v) {
     if (!picker.value) { msg.textContent = "Pick a folder or a file first."; return; }
     store("jobs", jobs.value); picker.remember();
     try {
+      if (profile.value === "auto") {
+        if (!shows || showsFor !== worker.value + "|" + picker.value) {
+          await loadShows();
+          if (shows.length) msg.textContent = "Check the profile for each show below, then press Start again.";
+          return;
+        }
+        if (!shows.length) return;
+        await agentApi(worker.value, "profiles", { profiles: Object.fromEntries(shows.map((s) => [s.show, s.choice])) });
+      }
       await startJob(worker.value, "convert", { paths: [picker.value], profile: profile.value, jobs: +jobs.value,
         folders: +(custom.value || folders.value), dry_run: dry.checked, retry_failed: retry.checked });
     } catch (e) { msg.textContent = e.message; }
@@ -346,6 +394,7 @@ async function viewConvert(v) {
     h("div", { style: "margin-top:12px" }, h("label", {}, "Folder or file"), picker),
     h("div", { class: "row" }, h("label", { class: "check" }, dry, "Dry run: show what each file would become, convert nothing"),
       h("label", { class: "check" }, retry, "Retry files that failed before")),
+    showsBox,
     h("div", { class: "row" }, go, msg)));
 }
 

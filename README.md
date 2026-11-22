@@ -147,6 +147,11 @@ a table, apply, undo), Failures (latest attempt per file, with Retry),
 History, **Needs you** and **Settings**. It only passes requests on to the
 agents, and only the ones it knows; it never touches media itself.
 
+Convert's **Per show** profile lists the show and movie folders a run would
+convert, each with Live or Animated (or one letter per show, like `alla`, as the
+old command line asked). The choices are saved per show and used again next time;
+shows never set get live.
+
 **Needs you** checks the library against Plex (`tinyclean --audit`, read only)
 and lists what only a person can sort out: duplicates (one movie or episode in
 several files, each with **Keep this one**, which deletes the others after a

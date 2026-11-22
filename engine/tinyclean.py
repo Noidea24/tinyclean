@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.13"
+VERSION = "8.5.14"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -904,6 +904,41 @@ def show_key(path, roots):
             return str(root / rel.parts[0])
         return str(root)
     return str(path.parent)
+
+
+def show_profiles(args, cfg, state_dir):
+    """--list-shows / --set-profiles: the per-show animated/live choices that convert remembers in
+    profiles.json, for the dashboard to show and set before a run. Takes no lock and starts nothing."""
+    profiles_file = state_dir / "profiles.json"
+    try:
+        profiles = json.loads(profiles_file.read_text())
+    except (OSError, ValueError):
+        profiles = {}
+    if args.set_profiles:
+        try:
+            new = json.loads(args.set_profiles)
+        except ValueError:
+            sys.exit("--set-profiles needs a JSON object of show -> animated or live")
+        if not isinstance(new, dict) or any(v not in PROFILES for v in new.values()):
+            sys.exit(f"--set-profiles values must be one of: {', '.join(sorted(PROFILES))}")
+        profiles.update({str(k): v for k, v in new.items()})
+        state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = profiles_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(profiles, indent=1, sort_keys=True))
+        tmp.replace(profiles_file)
+        print(json.dumps({"saved": len(new)}))
+        return
+    try:
+        state = json.loads((state_dir / "state.json").read_text())
+    except (OSError, ValueError):
+        state = {}
+    info = {}
+    for p, sz in find_files(args.paths, cfg, state):
+        k = show_key(p, args.paths)
+        n, b = info.get(k, (0, 0))
+        info[k] = (n + 1, b + sz)
+    print(json.dumps([{"show": k, "name": Path(k).name, "files": n, "bytes": b, "profile": profiles.get(k)}
+                      for k, (n, b) in sorted(info.items(), key=lambda x: Path(x[0]).name.lower())]))
 
 
 def ask_profiles(shows, profiles, interactive):
@@ -2942,6 +2977,10 @@ def main():
     ap.add_argument("--encoder", choices=["qsv", "x265"], default="qsv")
     ap.add_argument("--device", default="/dev/dri/renderD128")
     ap.add_argument("--profile", choices=sorted(PROFILES), help="use this profile for every file (no questions)")
+    ap.add_argument("--list-shows", action="store_true",
+                    help="list the shows/movies the paths would convert, with their saved profile, as JSON; changes nothing")
+    ap.add_argument("--set-profiles", metavar="JSON",
+                    help='save profiles per show, e.g. \'{"/data/Episodes/Recess": "animated"}\'; changes nothing else')
     ap.add_argument("--keep-hdr", action="store_true",
                     help="copy HDR video untouched (old behaviour) instead of re-encoding it at 1080p")
     ap.add_argument("--keep-sample", action="store_true",
@@ -2999,7 +3038,7 @@ def main():
     org.add_argument("--env-file", default=ENV_FILE, help="where PLEX_URL, PLEX_TOKEN and PLEX_PATH_MAP are kept")
     org.add_argument("--plex-url", help="use this Plex address instead of the one in the env file")
     args = ap.parse_args()
-    if not args.paths and not (args.apply_plan or args.undo or args.audit):
+    if not args.paths and not (args.apply_plan or args.undo or args.audit or args.set_profiles):
         ap.error("give one or more folders or files")
 
     jf = "/usr/lib/jellyfin-ffmpeg/"
@@ -3039,6 +3078,10 @@ def main():
     if args.status:
         for lib in dict.fromkeys(library_root(p) for p in args.paths):
             write_status(lib, echo=True)
+        return
+
+    if args.list_shows or args.set_profiles:
+        show_profiles(args, cfg, Path(args.state_dir))
         return
 
     state_dir = Path(args.state_dir)

@@ -40,7 +40,7 @@ TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".s
 ALLOWED = [
     ("GET", r"status"), ("GET", r"jobs"), ("GET", r"jobs/[\w-]+"), ("POST", r"jobs"), ("POST", r"jobs/[\w-]+/stop"),
     ("GET", r"plans"), ("GET", r"plans/plan-[\w.-]+\.json"), ("GET", r"undo"), ("GET", r"undo/undo-[\w.-]+\.json"),
-    ("GET", r"ledger"), ("GET", r"browse"), ("GET", r"audit"), ("GET", r"update"), ("POST", r"update"), ("POST", r"leave"),
+    ("GET", r"ledger"), ("GET", r"browse"), ("GET", r"audit"), ("GET", r"update"), ("POST", r"update"), ("POST", r"leave"), ("POST", r"shows"), ("POST", r"profiles"),
 ]
 
 

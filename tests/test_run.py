@@ -154,3 +154,19 @@ def test_progress_lines_and_folder_limit(tmp_path, home):
     assert records and records[-1]["files_total"] == 1 and records[-1]["files_finished"] == 1
     assert records[-1]["converted"] == 1 and records[-1]["active"] == []
     assert (lib / "A (2001)" / "Clean").is_dir() and not (lib / "B (2002)" / "Clean").exists()
+
+
+def test_shows_are_listed_and_their_profiles_saved(tc, tmp_path, home):
+    """The dashboard's per-show choice: list shows with their saved profile, save new ones."""
+    import json
+    lib = tmp_path / "Episodes"
+    make_video(lib / "Recess" / "S01" / "Recess - S01E01.mkv", seconds=2)
+    make_video(lib / "The Wire" / "Season 1" / "The Wire - S01E01.mkv", seconds=2)
+    shows = json.loads(run_cli("--list-shows", "--min-age", "0", "--", lib, home=home).stdout)
+    assert [(s["name"], s["files"], s["profile"]) for s in shows] == [("Recess", 1, None), ("The Wire", 1, None)]
+    saved = run_cli("--set-profiles", json.dumps({shows[0]["show"]: "animated"}), home=home).stdout
+    assert json.loads(saved) == {"saved": 1}
+    again = json.loads(run_cli("--list-shows", "--min-age", "0", "--", lib, home=home).stdout)
+    assert [s["profile"] for s in again] == ["animated", None]
+    bad = run_cli("--set-profiles", json.dumps({"x": "cartoon"}), home=home, check=False)
+    assert bad.returncode != 0

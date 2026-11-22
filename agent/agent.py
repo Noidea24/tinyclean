@@ -163,6 +163,41 @@ def _name(a, key):
     return v
 
 
+def run_engine(cfg, argv, timeout=300):
+    """Run the engine for a quick answer (not a job): its JSON output, or BadRequest with its error."""
+    try:
+        out = subprocess.run([sys.executable, str(cfg["engine"]), *argv], capture_output=True, text=True,
+                             timeout=timeout, cwd=os.path.expanduser("~"), stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BadRequest(f"the engine did not answer: {exc}")
+    if out.returncode != 0:
+        lines = (out.stderr or out.stdout).strip().splitlines()
+        raise BadRequest(lines[-1] if lines else "the engine failed")
+    try:
+        return json.loads(out.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise BadRequest("the engine gave no answer")
+
+
+def list_shows(cfg, a):
+    return run_engine(cfg, ["--list-shows", "--"] + _paths(a, cfg["roots"]))
+
+
+def set_profiles(cfg, a):
+    raw = a.get("profiles")
+    if not isinstance(raw, dict) or not raw or len(raw) > 5000:
+        raise BadRequest("profiles: give an object of show folder -> animated or live")
+    clean = {}
+    for show, prof in raw.items():
+        if prof not in PROFILES:
+            raise BadRequest(f"{show}: profile must be one of: {', '.join(PROFILES)}")
+        real = Path(os.path.realpath(str(show)))
+        if not any(real == r or r in real.parents for r in cfg["roots"]):
+            raise BadRequest(f"{show} is outside the library folders")
+        clean[str(show)] = prof
+    return run_engine(cfg, ["--set-profiles", json.dumps(clean)], timeout=30)
+
+
 def build_argv(kind, a, cfg):
     """The engine's options for a job request. Only what is listed here can ever be passed."""
     if not isinstance(a, dict):
@@ -173,8 +208,10 @@ def build_argv(kind, a, cfg):
                          "apply_plan, undo, audit, delete")
     plans, undo = cfg["engine_state"] / "plans", cfg["engine_state"] / "undo"
     if kind == "convert":
-        argv = ["--profile", _choice(a, "profile", PROFILES), "--jobs", str(_int(a, "jobs", 1, 4, 1)),
-                "--progress-lines"]
+        profile = _choice(a, "profile", PROFILES + ("auto",))
+        # auto: each show uses the profile saved for it (POST /api/profiles); unknown shows get live
+        argv = ([] if profile == "auto" else ["--profile", profile]) + [
+            "--jobs", str(_int(a, "jobs", 1, 4, 1)), "--progress-lines"]
         for key, flag, hi in (("folders", "--folders", 100000), ("limit", "--limit", 100000)):
             n = _int(a, key, 0, hi)
             if n:
@@ -717,6 +754,12 @@ def make_handler(cfg, jobs, started):
                 except BadRequest as exc:
                     return self.send(409 if "running" in str(exc) else 400, {"error": str(exc)})
                 return self.send(202, {"ok": True, "message": "update requested; the agent restarts in a minute"})
+            if parts in (["api", "shows"], ["api", "profiles"]):
+                try:
+                    out = list_shows(cfg, body) if parts[1] == "shows" else set_profiles(cfg, body)
+                except BadRequest as exc:
+                    return self.send(400, {"error": str(exc)})
+                return self.send(200, {"shows": out} if parts[1] == "shows" else out)
             if parts == ["api", "leave"]:
                 try:
                     set_left_alone(cfg, body.get("folder"), body.get("leave", True) is not False,
