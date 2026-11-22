@@ -616,6 +616,17 @@ def test_a_three_digit_number_plex_misread_is_skipped(tc, lib):
     assert not tc.three_digit_code("Show - 101 - x.mkv", {"season": 1, "episode": 9})
 
 
+def test_a_very_long_episode_title_is_shortened_to_fit(tc, lib):
+    """Interspecies Reviewers S01E10: Plex's title alone is over 255 bytes."""
+    f = touch(lib["shows"] / "breaking bad" / "S1" / "Breaking Bad - S01E09 - Let Your Eyes Behold the Glory-noidea.mkv")
+    long = "Let Your Eyes Behold the Glory " * 12
+    lib["plex"].episodes.append(episode("10", 1, 9, long.strip() + "!!!", str(f)))
+    new = {it["old"]: it["new"] for it in plan(tc, lib, "rename")["items"]}[str(f)]
+    name = new.rsplit("/", 1)[1]
+    assert len(name.encode()) <= 240 and name.endswith("-noidea.mkv")
+    assert name.startswith("Breaking Bad (2008) - S01E09 - Let Your Eyes Behold the Glory")
+
+
 def test_title_from_name(tc):
     assert tc.title_from_name("s2014e05 - Too Many Cooks-noidea.mkv") == "Too Many Cooks"
     assert tc.title_from_name("Show - S01E02 - Pilot [WEBDL-1080p][x265]-noidea.mkv") == "Pilot"

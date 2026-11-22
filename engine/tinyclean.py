@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.18"
+VERSION = "8.5.19"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1863,14 +1863,25 @@ def sidecars(video):
     return [f for f, _ in sidecar_parts(video)]
 
 
+NAME_MAX_BYTES = 240     # file systems allow 255; room for subtitle endings like .en.forced.srt
+
+
 def target_for(entry, mode, templates, new_root_suffix="-new"):
     """Where ``entry`` goes under ``mode``."""
     f, v = entry["file"], entry["values"]
     kind = entry["kind"]
-    stem = render(templates["movie_file" if kind == "movie" else "episode_file"], v)
-    if done_suffix(f.stem):
-        stem += SUFFIX
-    name = stem + f.suffix
+    tail = (SUFFIX if done_suffix(f.stem) else "") + f.suffix
+    template = templates["movie_file" if kind == "movie" else "episode_file"]
+    stem = render(template, v)
+    words = str(v.get("episode_title") or "").split()
+    while len((stem + tail).encode()) > NAME_MAX_BYTES and words:
+        # names over 255 bytes cannot exist: drop words from the end of the episode title
+        words.pop()
+        v = {**v, "episode_title": " ".join(words).rstrip(" ,;:-!?.") or None}
+        stem = render(template, v)
+    while len((stem + tail).encode()) > NAME_MAX_BYTES:
+        stem = stem[:-1].rstrip()
+    name = stem + tail
     if mode == "rename":
         return f.parent / name
     root = entry["root"]
