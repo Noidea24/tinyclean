@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.12"
+VERSION = "8.5.13"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -2696,6 +2696,29 @@ def undo_run(undo_arg, state_dir, yes, env_file=ENV_FILE):
 AUDIT_FILE = "audit.json"
 
 
+def unreadable_files(state_dir):
+    """Files a convert run could not open (damaged, unfinished downloads): runs skip them from then on,
+    so they are listed here until the file is replaced. [{file, time, notes, redownload}]."""
+    try:
+        state = json.loads((Path(state_dir) / "state.json").read_text())
+    except (OSError, ValueError):
+        return []
+    out = []
+    for path, v in state.items():
+        if not isinstance(v, dict) or v.get("status") != "unreadable":
+            continue
+        try:
+            if int(Path(path).stat().st_mtime) != v.get("mtime"):
+                continue                # replaced since: the next run tries it again
+        except OSError:
+            continue                    # gone
+        reason = " ".join(str(v.get("reason") or "").split())[:160]
+        out.append({"file": path, "time": "", "redownload": True,
+                    "notes": "won't open, so it can't be converted (damaged or an unfinished download)"
+                             + (f": {reason}" if reason else "")})
+    return sorted(out, key=lambda r: r["file"])
+
+
 def ledger_failures(state_dir):
     """Files whose latest attempt failed, from the ledger: [{file, time, notes, redownload}]. A file that
     is no longer the one that failed (another size, e.g. downloaded again under the same name) is left out:
@@ -2843,7 +2866,7 @@ def audit(args, state_dir, ffprobe_bin=None):
         if in_scope(str(f)) and has_clean_copy(f):
             waiting[str(f.parent)] = waiting.get(str(f.parent), 0) + 1
 
-    failed = [r for r in ledger_failures(state_dir) if in_scope(r["file"])]
+    failed = [r for r in ledger_failures(state_dir) + unreadable_files(state_dir) if in_scope(r["file"])]
     result = {"version": 1, "created": time.time(), "scope": [str(p) for p in scope],
               "plex": {"url": settings["url"].rstrip("/"), "machine": machine},
               "duplicates": duplicates,

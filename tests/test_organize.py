@@ -903,3 +903,17 @@ def test_a_cancelled_move_still_blocks_its_old_number(tc, lib):
     moved = {it["old"] for it in p["items"]}
     assert str(a) not in moved and str(b) not in moved
     assert "new duplicate" in dict(p["skipped"])[str(a)]
+
+
+def test_files_a_run_could_not_open_show_in_needs_you(tc, lib, tmp_path, monkeypatch):
+    import os
+    state = tmp_path / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    bad = lib["heat"]
+    (state / "state.json").write_text(json.dumps({
+        str(bad): {"status": "unreadable", "mtime": int(bad.stat().st_mtime), "reason": "moov atom not found"},
+        str(lib["matrix"]): {"status": "done", "mtime": 1}}))
+    rows = tc.unreadable_files(state)
+    assert [r["file"] for r in rows] == [str(bad)] and rows[0]["redownload"] and "moov atom" in rows[0]["notes"]
+    os.utime(bad, (1, 1))                       # replaced since: no longer listed
+    assert tc.unreadable_files(state) == []
