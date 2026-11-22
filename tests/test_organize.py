@@ -627,6 +627,15 @@ def test_a_very_long_episode_title_is_shortened_to_fit(tc, lib):
     assert name.startswith("Breaking Bad (2008) - S01E09 - Let Your Eyes Behold the Glory")
 
 
+def test_a_number_plex_guessed_from_the_name_is_skipped(tc, lib):
+    """Captain Scarlet 13 Point 783: Plex has no episode 783, it read the number from the title."""
+    f = touch(lib["shows"] / "breaking bad" / "S1" / "Captain Scarlet 13 Point 783-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 783, "Episode 783", str(f)))
+    p = plan(tc, lib, "rename")
+    assert str(f) not in {it["old"] for it in p["items"]}
+    assert "no episode 783" in dict(p["skipped"])[str(f)]
+
+
 def test_title_from_name(tc):
     assert tc.title_from_name("s2014e05 - Too Many Cooks-noidea.mkv") == "Too Many Cooks"
     assert tc.title_from_name("Show - S01E02 - Pilot [WEBDL-1080p][x265]-noidea.mkv") == "Pilot"

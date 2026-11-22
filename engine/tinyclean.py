@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.19"
+VERSION = "8.5.20"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -2125,6 +2125,12 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                 skips.append((str(f), f"Plex read \u201c{n_}\u201d in the file name as episode {n_} and has no "
                                       f"episode by that number; it is probably S{s_:02d}E{n_ % 100:02d}: rename it "
                                       f"with an S{s_:02d}E{n_ % 100:02d} code and rescan Plex"))
+                continue
+            elif is_placeholder_title(e["values"].get("episode_title")) and not CODE_IN_NAME.search(f.name):
+                # no SxxEyy in the name and no such episode in Plex: Plex guessed the number from the name
+                n_ = int(e["values"].get("episode") or 0)
+                skips.append((str(f), f"Plex has no episode {n_} for this show and took the number from the file "
+                                      "name: check the episode number in the name, or match it in Plex"))
                 continue
             elif is_placeholder_title(e["values"].get("episode_title")):
                 e = {**e, "values": {**e["values"], "episode_title": title_from_name(f.name)}}
