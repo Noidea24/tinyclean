@@ -103,6 +103,19 @@ def test_default_templates_follow_plex_naming(tc):
     assert tc.render(tc.TEMPLATES["episode_file"], e) == "Breaking Bad (2008) - S01E02 - Cat's in the Bag"
 
 
+def test_a_year_already_in_the_title_is_not_added_twice(tc):
+    e = {"show": "Archer (2009)", "year": 2009, "tvdb": "110381", "season": 1, "episode": 1,
+         "episode_title": "Mole Hunt"}
+    assert tc.render(tc.TEMPLATES["show_folder"], e) == "Archer (2009) {tvdb-110381}"
+    assert tc.render(tc.TEMPLATES["episode_file"], e) == "Archer (2009) - S01E01 - Mole Hunt"
+    v = {"title": "Dune (2021)", "year": 2021, "tmdb": "438631"}
+    assert tc.render(tc.TEMPLATES["movie_folder"], v) == "Dune (2021) {tmdb-438631}"
+    # a different year in the title is part of the name; a template without {year} keeps it
+    assert tc.render(tc.TEMPLATES["movie_file"], {"title": "Blade Runner 2049 (1982)", "year": 2017}) \
+        == "Blade Runner 2049 (1982) (2017)"
+    assert tc.render("{show}", e) == "Archer (2009)"
+
+
 def test_custom_templates_put_the_id_and_year_anywhere(tc):
     v = {"title": "The Matrix", "year": 1999, "imdb": "tt0133093"}
     assert tc.render("{title} ({imdb}) {year}", v) == "The Matrix (tt0133093) 1999"
