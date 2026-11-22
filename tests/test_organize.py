@@ -617,6 +617,8 @@ def test_title_from_name(tc):
     assert tc.title_from_name("Show - S01E02 - Pilot [WEBDL-1080p][x265]-noidea.mkv") == "Pilot"
     assert tc.title_from_name("60 Days In - S01e05 -hevc-noidea.mkv") is None
     assert tc.title_from_name("No code here.mkv") is None
+    assert tc.title_from_name("BSG (2003) - S01E12 - Kobol's Last Gleaming (1) Bluray-1080p[x265]-noidea.mkv") \
+        == "Kobol's Last Gleaming (1)"
     assert tc.is_placeholder_title("Episode 12") and not tc.is_placeholder_title("Episode IV: A New Hope")
 
 

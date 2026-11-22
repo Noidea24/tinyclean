@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.16"
+VERSION = "8.5.17"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1937,7 +1937,16 @@ def title_from_name(name):
         rest += ")"
     rest = re.sub(r"\s+-\s*[A-Za-z0-9]+$", "", rest) if re.search(r"\s{2,}-\s*\w+$", rest) else rest
     rest = rest.replace(".", " ") if " " not in rest.strip(" .") else rest
-    rest = re.sub(r"\s+", " ", rest).strip(" .-_()")
+    rest = re.sub(r"\s+", " ", rest).replace("()", "").strip(" .-_")
+    while True:   # brackets go only when unpaired: "Kobol's Last Gleaming (1)" keeps its ")"
+        if rest.startswith("(") and rest.count("(") > rest.count(")"):
+            rest = rest[1:].strip(" .-_")
+        elif rest.endswith(")") and rest.count(")") > rest.count("("):
+            rest = rest[:-1].strip(" .-_")
+        elif rest.startswith("(") and rest.endswith(")") and rest.count("(") == 1:
+            rest = rest[1:-1].strip(" .-_")
+        else:
+            break
     return rest if re.search(r"[A-Za-z]{2}", rest or "") else None
 
 
