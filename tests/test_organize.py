@@ -636,6 +636,18 @@ def test_a_number_plex_guessed_from_the_name_is_skipped(tc, lib):
     assert "no episode 783" in dict(p["skipped"])[str(f)]
 
 
+def test_a_show_without_a_tvdb_id_keeps_another_id_in_its_folder(tc):
+    v = {"show": "The New Scooby-Doo Mysteries", "year": 1984, "imdb": "tt0086767"}
+    assert tc.id_fallback(tc.render(tc.TEMPLATES["show_folder"], v), v, "tvdb") \
+        == "The New Scooby-Doo Mysteries (1984) {imdb-tt0086767}"
+    v = {"show": "Unsolved Mysteries", "year": 2020, "tmdb": "100698", "imdb": "tt12588448"}
+    assert tc.id_fallback(tc.render(tc.TEMPLATES["show_folder"], v), v, "tvdb") \
+        == "Unsolved Mysteries (2020) {tmdb-100698}"
+    v = {"show": "Archer", "year": 2009, "tvdb": "110381", "imdb": "tt1486217"}
+    assert tc.id_fallback(tc.render(tc.TEMPLATES["show_folder"], v), v, "tvdb") == "Archer (2009) {tvdb-110381}"
+    assert tc.id_fallback("Nothing (2001)", {"show": "Nothing"}, "tvdb") == "Nothing (2001)"
+
+
 def test_title_from_name(tc):
     assert tc.title_from_name("s2014e05 - Too Many Cooks-noidea.mkv") == "Too Many Cooks"
     assert tc.title_from_name("Show - S01E02 - Pilot [WEBDL-1080p][x265]-noidea.mkv") == "Pilot"

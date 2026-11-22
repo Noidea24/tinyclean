@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.20"
+VERSION = "8.5.21"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1888,8 +1888,20 @@ def target_for(entry, mode, templates, new_root_suffix="-new"):
     if mode == "newtree":
         root = root.with_name(root.name + new_root_suffix)
     if kind == "movie":
-        return root / render(templates["movie_folder"], v) / name
-    return root / render(templates["show_folder"], v) / render(templates["season_folder"], v) / name
+        return root / id_fallback(render(templates["movie_folder"], v), v, "tmdb") / name
+    folder = id_fallback(render(templates["show_folder"], v), v, "tvdb")
+    return root / folder / render(templates["season_folder"], v) / name
+
+
+def id_fallback(folder, values, wanted):
+    """Plex matched some shows and movies by another source: no tvdb (or tmdb) ID, but an imdb or tmdb one.
+    The folder then gets that ID instead, so it keeps a match hint: 'Show (1984) {imdb-tt0086767}'."""
+    if values.get(wanted) or re.search(r"\{(?:tvdb|tmdb|imdb)-", folder):
+        return folder
+    for other in ("tmdb", "tvdb", "imdb"):
+        if other != wanted and values.get(other):
+            return f"{folder} {{{other}-{values[other]}}}"
+    return folder
 
 
 MULTI_EPISODE = [
