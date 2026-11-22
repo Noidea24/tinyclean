@@ -110,9 +110,13 @@ def test_a_year_already_in_the_title_is_not_added_twice(tc):
     assert tc.render(tc.TEMPLATES["episode_file"], e) == "Archer (2009) - S01E01 - Mole Hunt"
     v = {"title": "Dune (2021)", "year": 2021, "tmdb": "438631"}
     assert tc.render(tc.TEMPLATES["movie_folder"], v) == "Dune (2021) {tmdb-438631}"
-    # a different year in the title is part of the name; a template without {year} keeps it
-    assert tc.render(tc.TEMPLATES["movie_file"], {"title": "Blade Runner 2049 (1982)", "year": 2017}) \
-        == "Blade Runner 2049 (1982) (2017)"
+    # a different year in the title (Plex's own name) wins: never two years
+    b = {"show": "Battlestar Galactica (2003)", "year": 2004, "tvdb": "73545", "season": 1, "episode": 1,
+         "episode_title": "33"}
+    assert tc.render(tc.TEMPLATES["show_folder"], b) == "Battlestar Galactica (2003) {tvdb-73545}"
+    assert tc.render(tc.TEMPLATES["episode_file"], b) == "Battlestar Galactica (2003) - S01E01 - 33"
+    assert tc.render(tc.TEMPLATES["movie_file"], {"title": "Blade Runner 2049", "year": 2017}) \
+        == "Blade Runner 2049 (2017)"
     assert tc.render("{show}", e) == "Archer (2009)"
 
 

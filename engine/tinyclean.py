@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.17"
+VERSION = "8.5.18"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1588,12 +1588,12 @@ def render(template, values):
             return _EMPTY
         if name in ("season", "episode") and str(value).isdigit():
             return str(int(value)).zfill(int(width) if width else 2)
-        if name in ("title", "show") and has_year:
-            # Plex sometimes keeps the year in the title ("Archer (2009)"): the template adds it.
-            value = re.sub(r"\s*\(" + re.escape(str(values["year"])) + r"\)\s*$", "", str(value)) or value
         return str(value)
-    has_year = values.get("year") not in (None, "") and any(
-        m.group(1) == "year" for m in _TOKEN.finditer(template))
+    # Plex sometimes keeps a year in the title ("Archer (2009)", "Battlestar Galactica (2003)" with
+    # year 2004): that year stays and the template's year is left out, so a name never gets two.
+    named = str(values.get("show") or values.get("title") or "")
+    if re.search(r"\((?:19|20)\d\d\)\s*$", named):
+        values = {**values, "year": None}
     out = _TOKEN.sub(token, template)
     # A bracket group holding an empty token goes entirely: "({imdb})" or "{tmdb-{tmdb}}".
     out = re.sub(r"[(\[{][^()\[\]{}" + _EMPTY + r"]*" + _EMPTY + r"[^()\[\]{}]*[)\]}]", "", out)
