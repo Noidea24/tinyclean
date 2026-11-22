@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.15"
+VERSION = "8.5.16"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1912,6 +1912,14 @@ def is_placeholder_title(title):
     return not title or bool(PLACEHOLDER_TITLE.match(str(title)))
 
 
+def three_digit_code(name, values):
+    """True when Plex took a season-and-episode number like '101' (S01E01) as episode 101."""
+    season, episode = values.get("season"), values.get("episode")
+    if not str(episode).isdigit() or not str(season).isdigit() or int(episode) < 100 or CODE_IN_NAME.search(name):
+        return False
+    return int(episode) // 100 == int(season) and bool(re.search(rf"(?<!\d){int(episode)}(?!\d)", name))
+
+
 def title_from_name(name):
     """The title written after the episode code in a file name, or None:
     's2014e05 - Too Many Cooks-noidea.mkv' -> 'Too Many Cooks'."""
@@ -2091,6 +2099,13 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                 continue
             if rng:
                 e = {**e, "values": as_multi_episode(e["values"], rng)}
+            elif is_placeholder_title(e["values"].get("episode_title")) and three_digit_code(f.name, e["values"]):
+                v = e["values"]
+                s_, n_ = int(v.get("season") or 0), int(v.get("episode") or 0)
+                skips.append((str(f), f"Plex read \u201c{n_}\u201d in the file name as episode {n_} and has no "
+                                      f"episode by that number; it is probably S{s_:02d}E{n_ % 100:02d}: rename it "
+                                      f"with an S{s_:02d}E{n_ % 100:02d} code and rescan Plex"))
+                continue
             elif is_placeholder_title(e["values"].get("episode_title")):
                 e = {**e, "values": {**e["values"], "episode_title": title_from_name(f.name)}}
             else:

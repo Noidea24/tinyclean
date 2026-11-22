@@ -601,6 +601,17 @@ def test_placeholder_titles_from_plex_keep_the_file_names_title(tc, lib):
     assert new.endswith("Breaking Bad (2008) - S01E09 - Too Many Cooks-noidea.mkv")
 
 
+def test_a_three_digit_number_plex_misread_is_skipped(tc, lib):
+    """Avengers Assemble - 101 - ...: Plex took 101 as episode 101 (no such episode), not S01E01."""
+    f = touch(lib["shows"] / "breaking bad" / "S1" / "Breaking Bad - 101 - Pilot {C_P}-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 1, 101, "Episode 101", str(f)))
+    p = plan(tc, lib, "rename")
+    assert str(f) not in {it["old"] for it in p["items"]}
+    assert "probably S01E01" in dict(p["skipped"])[str(f)]
+    assert not tc.three_digit_code("Show - S01E101 - x.mkv", {"season": 1, "episode": 101})
+    assert not tc.three_digit_code("Show - 101 - x.mkv", {"season": 1, "episode": 9})
+
+
 def test_title_from_name(tc):
     assert tc.title_from_name("s2014e05 - Too Many Cooks-noidea.mkv") == "Too Many Cooks"
     assert tc.title_from_name("Show - S01E02 - Pilot [WEBDL-1080p][x265]-noidea.mkv") == "Pilot"
