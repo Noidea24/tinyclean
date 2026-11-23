@@ -63,3 +63,25 @@ def test_a_file_without_video_is_refused(tc, cfg, tmp_path):
         assert "no video" in str(exc)
     else:
         raise AssertionError("expected a refusal")
+
+
+def test_quality_levels_shift_quality_and_go_10_bit(tc, cfg):
+    std = tc.profile_cfg(cfg, "live")
+    high = tc.profile_cfg(cfg, "live", "high")
+    mx = tc.profile_cfg(cfg, "animated", "max")
+    assert (std["quality_hd"], std.get("ten_bit_out")) == (22, None)
+    assert (high["quality_hd"], high["preset"], high["ten_bit_out"]) == (20, "medium", True)
+    assert (mx["quality_hd"], mx["quality_sd"], mx["preset"]) == (20, 19, "slow")
+
+
+def test_high_quality_makes_an_8_bit_source_10_bit(tc, cfg, tmp_path):
+    """Blocky dark scenes: 'high' encodes main10 from 8-bit, converting on the CPU before upload."""
+    src = make_video(tmp_path / "q.mkv", seconds=1, audio=False)
+    c = {**tc.profile_cfg(cfg, "live", "high"), "encoder": "qsv", "device": "/dev/dri/renderD128"}
+    p = tc.plan_file(src, tc.ffprobe(cfg["ffprobe"], src), c)
+    assert "10-bit" in p["video_why"] and "high quality" in p["video_why"]
+    cmd = " ".join(tc.build_cmd(p, c, tmp_path / "out.mkv", "encode", decode="gpu"))
+    assert "main10" in cmd and "format=p010le" in cmd and "-hwaccel qsv" not in cmd
+    std = {**tc.profile_cfg(cfg, "live"), "encoder": "qsv", "device": "/dev/dri/renderD128"}
+    cmd = " ".join(tc.build_cmd(p, std, tmp_path / "out.mkv", "encode", decode="gpu"))
+    assert "-profile:v main " in cmd and "-hwaccel qsv" in cmd

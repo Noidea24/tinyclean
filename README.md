@@ -132,6 +132,17 @@ started, with sizes, so you can review and replace one folder at a time.
 | animated | faster | 24 / 23 |
 | live | faster | 22 / 22 |
 
+`--quality` sits on top of the profile, for the whole run:
+
+| Quality | Preset | Quality HD / SD | Bit depth | Size |
+|---|---|---|---|---|
+| standard (default) | the profile's | the profile's | as the source | - |
+| high | medium | profile - 2 | always 10-bit | about a third bigger |
+| max | slow | profile - 4 | always 10-bit | about twice, much slower |
+
+10-bit H.265 has far less banding and blocking in dark scenes and fades than 8-bit. An
+8-bit source made 10-bit is decoded on the CPU and converted before upload to the iGPU.
+
 Other options: `--jobs N`, `--batch N`, `--min-free-gb`, `--keep-hdr`, `--keep-sample`,
 `--limit`, `--folders N` (first N show/movie folders), `--retry-failed`, `--state-dir`, `--check`, `--rename-suffix`.
 Tagging old files needs `mkvpropedit` (`apt install mkvtoolnix`). Ctrl+C stops cleanly; touching

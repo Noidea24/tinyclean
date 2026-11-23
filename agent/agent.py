@@ -40,6 +40,7 @@ PROGRESS_PREFIX = "@progress "
 KEEP_JOBS = 200
 MEMORY_LINES = 20000
 PROFILES = ("animated", "live")
+QUALITIES = ("standard", "high", "max")   # the engine's --quality levels
 ORGANIZE_MODES = ("rename", "restructure", "newtree")
 TEMPLATE_NAMES = ("movie_folder", "movie_file", "show_folder", "season_folder", "episode_file")
 NAME_OK = re.compile(r"^(latest|(plan|undo)-[\w.-]+\.json)$")
@@ -210,8 +211,9 @@ def build_argv(kind, a, cfg):
     if kind == "convert":
         profile = _choice(a, "profile", PROFILES + ("auto",))
         # auto: each show uses the profile saved for it (POST /api/profiles); unknown shows get live
+        quality = _choice(a, "quality", QUALITIES, required=False) or "standard"
         argv = ([] if profile == "auto" else ["--profile", profile]) + [
-            "--jobs", str(_int(a, "jobs", 1, 4, 1)), "--progress-lines"]
+            "--quality", quality, "--jobs", str(_int(a, "jobs", 1, 4, 1)), "--progress-lines"]
         for key, flag, hi in (("folders", "--folders", 100000), ("limit", "--limit", 100000)):
             n = _int(a, key, 0, hi)
             if n:

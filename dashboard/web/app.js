@@ -255,7 +255,7 @@ function describe(job) {
   const where = Array.isArray(a.paths) ? a.paths.map((p) => p.split("/").slice(-2).join("/")).join(", ") : (a.plan || a.log || "");
   const names = { audit: "Check the library", delete: "Delete", convert: "Convert", check: "Check", replace: "Replace", rename_suffix: "Give -noidea back",
                   status: "Status", organize: "Organize", apply_plan: "Apply plan", undo: "Undo" };
-  return (names[job.kind] || job.kind) + (a.mode ? ` (${a.mode})` : "") + (a.dry_run ? " - dry run" : "") + (where ? ": " + where : "");
+  return (names[job.kind] || job.kind) + (a.mode ? ` (${a.mode})` : "") + (a.quality && a.quality !== "standard" ? ` (${a.quality} quality)` : "") + (a.dry_run ? " - dry run" : "") + (where ? ": " + where : "");
 }
 
 async function viewOverview(v) {
@@ -328,6 +328,11 @@ async function viewConvert(v) {
     store("profile") || "live", (p) => { store("profile", p); if (p !== "auto") showsBox.replaceChildren(); });
   const jobs = h("select", {}, ...[1, 2, 3, 4].map((n) => h("option", { value: n, text: String(n) })));
   jobs.value = store("jobs") || 1;
+  const quality = segmented([["Standard", "standard"], ["High", "high"], ["Max", "max"]],
+    store("quality") || "standard", (q) => store("quality", q));
+  const qualityNote = h("span", { class: "muted", text:
+    "High and Max encode 10-bit with more bits: fewer blocks in dark scenes and fades. " +
+    "High is about a third bigger, Max about twice the size and much slower." });
 
   // Per show: list the shows in the folder, each with live/animated, like the old a/l letters.
   const drawShows = () => {
@@ -384,12 +389,14 @@ async function viewConvert(v) {
         await agentApi(worker.value, "profiles", { profiles: Object.fromEntries(shows.map((s) => [s.show, s.choice])) });
       }
       await startJob(worker.value, "convert", { paths: [picker.value], profile: profile.value, jobs: +jobs.value,
+        quality: quality.value,
         folders: +(custom.value || folders.value), dry_run: dry.checked, retry_failed: retry.checked });
     } catch (e) { msg.textContent = e.message; }
   });
   v.append(h("section", {}, h("h2", { text: "Convert" }),
     h("div", { class: "grid" }, h("label", {}, "Worker", worker), h("label", {}, "Files at once", jobs)),
     h("div", { class: "row" }, h("span", { class: "muted", text: "Profile" }), profile),
+    h("div", { class: "row" }, h("span", { class: "muted", text: "Quality" }), quality, qualityNote),
     h("div", { class: "row" }, h("span", { class: "muted", text: "Show/movie folders this run" }), folders, custom),
     h("div", { style: "margin-top:12px" }, h("label", {}, "Folder or file"), picker),
     h("div", { class: "row" }, h("label", { class: "check" }, dry, "Dry run: show what each file would become, convert nothing"),

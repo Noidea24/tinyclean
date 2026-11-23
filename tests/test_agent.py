@@ -152,9 +152,12 @@ def test_job_options_are_built_from_a_fixed_list(agent_mod, cfg, library):
     film = str(library / "Movies" / "Film (2001)")
     argv = agent_mod.build_argv("convert", {"paths": [film], "profile": "live", "jobs": 2, "folders": 3,
                                             "dry_run": True}, cfg)
-    assert argv == ["--profile", "live", "--jobs", "2", "--progress-lines", "--folders", "3", "--dry-run",
+    assert argv == ["--profile", "live", "--quality", "standard", "--jobs", "2", "--progress-lines", "--folders", "3", "--dry-run",
                     "--", film]
-    assert agent_mod.build_argv("convert", {"paths": [film], "profile": "auto"}, cfg)[:2] == ["--jobs", "1"]
+    assert agent_mod.build_argv("convert", {"paths": [film], "profile": "auto"}, cfg)[:4] == \
+        ["--quality", "standard", "--jobs", "1"]
+    assert agent_mod.build_argv("convert", {"paths": [film], "profile": "live", "quality": "high"},
+                                cfg)[:4] == ["--profile", "live", "--quality", "high"]
     with pytest.raises(agent_mod.BadRequest):
         agent_mod.set_profiles(cfg, {"profiles": {film: "cartoon"}})
     with pytest.raises(agent_mod.BadRequest):
@@ -170,6 +173,7 @@ def test_job_options_are_built_from_a_fixed_list(agent_mod, cfg, library):
     ("convert", {"paths": ["/etc"], "profile": "live"}, "outside the library"),
     ("convert", {"paths": ["{lib}/../.."], "profile": "live"}, "outside the library"),
     ("convert", {"paths": ["{lib}/Movies"], "profile": "fast"}, "profile must be"),
+    ("convert", {"paths": ["{lib}/Movies"], "profile": "live", "quality": "ultra"}, "quality must be"),
     ("convert", {"paths": ["{lib}/Movies"], "profile": "live", "jobs": 9}, "between 1 and 4"),
     ("convert", {"paths": ["{lib}/nope"], "profile": "live"}, "does not exist"),
     ("replace", {"paths": ["{lib}/Movies"]}, "confirm=true"),

@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.22"
+VERSION = "8.6.0"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -113,6 +113,15 @@ PROFILES = {
     "live":     {"preset": "faster", "quality_hd": 22, "quality_sd": 22},
 }
 DEFAULT_PROFILE = "live"     # used for unknown shows when nobody is there to answer
+# Quality level, chosen per run on top of the show's live/animated profile. Higher levels spend more
+# bits and time, and always encode 10-bit: 10-bit H.265 has far less banding and blocking in dark
+# scenes and fades than 8-bit at the same size, and every Plex client that plays H.265 plays 10-bit.
+QUALITY_LEVELS = {
+    "standard": {},                                                    # the profile as it is
+    "high":     {"preset": "medium", "ten_bit_out": True, "q_shift": -2},  # about 30-40% bigger
+    "max":      {"preset": "slow",   "ten_bit_out": True, "q_shift": -4},  # about 2x, slowest
+}
+DEFAULT_QUALITY = "standard"
 # A "show" is the first folder under one of these, whichever folder you point tinyclean at.
 LIBRARY_ROOTS = ["/data/Episodes", "/data/Movies"]
 SEASON_DIR = re.compile(r"^(season|series|s)[ ._-]*\d+|^specials$|^extras$", re.I)
@@ -471,7 +480,7 @@ def plan_file(path, info, cfg):
             bits.append(f"{w}x{h}->{out_w}x{out_h}")
         if interlaced:
             bits.append("deinterlace")
-        bits.append("10-bit" if ten_bit else "8-bit")
+        bits.append("10-bit" if ten_bit or cfg.get("ten_bit_out") else "8-bit")
         if hdr:
             bits.append(f"{HDR_NAMES.get(v.get('color_transfer'), 'HDR')} kept")
         if dovi:
@@ -480,6 +489,8 @@ def plan_file(path, info, cfg):
         bits.append(f"q{q}")
         bits.append(cfg["preset"] if cfg["encoder"] == "qsv" else cfg["x265_preset"])
         bits.append(f"{cfg.get('profile_name', '?')} profile")
+        if cfg.get("quality_name", DEFAULT_QUALITY) != DEFAULT_QUALITY:
+            bits.append(f"{cfg['quality_name']} quality")
         video_why = f"{v.get('codec_name')} {w}x{h} {bpp:.3f} bpp -> H.265 (" + ", ".join(bits) + ")"
 
     # ---- audio
@@ -534,6 +545,20 @@ def plan_file(path, info, cfg):
 # -------------------------------------------------------------- ffmpeg cmd --
 
 
+def profile_cfg(cfg, name, quality=DEFAULT_QUALITY):
+    """The settings for one file: base config, its live/animated profile, the run's quality level,
+    then any --quality-hd/--quality-sd given by hand."""
+    level = QUALITY_LEVELS[quality or DEFAULT_QUALITY]
+    out = {**cfg, **PROFILES[name]}
+    shift = level.get("q_shift", 0)
+    out.update({k: v for k, v in level.items() if k != "q_shift"})
+    out["quality_hd"] = max(1, out["quality_hd"] + shift)
+    out["quality_sd"] = max(1, out["quality_sd"] + shift)
+    out.update(cfg["overrides"])
+    out.update(profile_name=name, quality_name=quality or DEFAULT_QUALITY)
+    return out
+
+
 def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, decode="cpu", low_power=False):
     v = plan["video"]
     cmd = [cfg["ffmpeg"], "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
@@ -543,7 +568,9 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, dec
         # Same device setup Jellyfin uses: VA-API on the iGPU, Quick Sync on top.
         cmd += ["-init_hw_device", f"vaapi=va:{cfg['device']},driver=iHD",
                 "-init_hw_device", "qsv=qs@va", "-filter_hw_device", "qs"]
-    gpu = encode and cfg["encoder"] == "qsv" and decode == "gpu"
+    out10 = plan.get("ten_bit") or bool(cfg.get("ten_bit_out"))
+    # An 8-bit source made 10-bit is converted on the CPU side (format=p010le) before upload.
+    gpu = encode and cfg["encoder"] == "qsv" and decode == "gpu" and out10 == bool(plan.get("ten_bit"))
     if gpu:
         # Decode on the iGPU too: frames never leave the GPU (much faster at fast presets).
         cmd += ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv",
@@ -580,20 +607,20 @@ def build_cmd(plan, cfg, out_path, video_mode, rate_mode="icq", sample=None, dec
                     "-color_range", v.get("color_range") or "tv"]
         if cfg["encoder"] == "qsv":
             if not gpu:
-                filters += ["format=p010le" if plan["ten_bit"] else "format=nv12",
+                filters += ["format=p010le" if out10 else "format=nv12",
                             "hwupload=extra_hw_frames=64"]
                 cmd += ["-vf", ",".join(filters)]
             elif plan["needs_scale"]:
                 # Resize on the iGPU too, so 4K never touches the CPU.
                 cmd += ["-vf", f"vpp_qsv=w={plan['out_w']}:h={plan['out_h']}"]
             cmd += ["-c:v", "hevc_qsv", "-preset", cfg["preset"],
-                    "-profile:v", "main10" if plan["ten_bit"] else "main"]
+                    "-profile:v", "main10" if out10 else "main"]
             if low_power:
                 cmd += ["-low_power", "1"]
             # ICQ (constant quality) first; CQP if the driver refuses ICQ.
             cmd += ["-global_quality", str(q)] if rate_mode == "icq" else ["-q:v", str(q)]
         else:  # software x265, for testing or a no-GPU box
-            filters.append("format=yuv420p10le" if plan["ten_bit"] else "format=yuv420p")
+            filters.append("format=yuv420p10le" if out10 else "format=yuv420p")
             cmd += ["-vf", ",".join(filters), "-c:v", "libx265", "-preset", cfg["x265_preset"],
                     "-crf", str(q), "-x265-params",
                     "log-level=error" + (":hdr10=1:hdr10-opt=1" if plan["hdr"] and v.get("color_transfer") == "smpte2084" else "")]
@@ -3036,6 +3063,9 @@ def main():
     ap.add_argument("--encoder", choices=["qsv", "x265"], default="qsv")
     ap.add_argument("--device", default="/dev/dri/renderD128")
     ap.add_argument("--profile", choices=sorted(PROFILES), help="use this profile for every file (no questions)")
+    ap.add_argument("--quality", choices=list(QUALITY_LEVELS), default=DEFAULT_QUALITY,
+                    help="standard (default), high (10-bit, q-2, medium) or max (10-bit, q-4, slow): "
+                         "fewer blocks in dark scenes and fades, bigger files")
     ap.add_argument("--list-shows", action="store_true",
                     help="list the shows/movies the paths would convert, with their saved profile, as JSON; changes nothing")
     ap.add_argument("--set-profiles", metavar="JSON",
@@ -3243,7 +3273,7 @@ def main():
 
     def file_cfg(path):
         name = args.profile or profiles.get(show_key(path, args.paths), DEFAULT_PROFILE)
-        return {**cfg, **PROFILES[name], **cfg["overrides"], "profile_name": name}
+        return profile_cfg(cfg, name, args.quality)
 
     status_root = library_root(args.paths[0])
     last_status = 0.0
