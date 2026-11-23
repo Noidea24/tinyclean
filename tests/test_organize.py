@@ -648,6 +648,14 @@ def test_a_show_without_a_tvdb_id_keeps_another_id_in_its_folder(tc):
     assert tc.id_fallback("Nothing (2001)", {"show": "Nothing"}, "tvdb") == "Nothing (2001)"
 
 
+def test_a_short_title_inside_a_longer_one_is_not_the_same_episode(tc):
+    """MST3K: the KTMA "Gamera" file was named "Gamera vs. Barugon" because one title held the other."""
+    assert not tc.titles_agree("Gamera", "Gamera vs. Barugon")
+    assert tc.titles_agree("Alive", "Alive!") and tc.titles_agree("Who is Super Cow", "Who is Super Cow?")
+    assert tc.titles_agree("Mork in Wonderland", "Mork in Wonderland (1)")
+    assert tc.titles_agree("The Ugliest Weenie", "The Ugliest Weenie - Part One")
+
+
 def test_title_from_name(tc):
     assert tc.title_from_name("s2014e05 - Too Many Cooks-noidea.mkv") == "Too Many Cooks"
     assert tc.title_from_name("Show - S01E02 - Pilot [WEBDL-1080p][x265]-noidea.mkv") == "Pilot"

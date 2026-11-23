@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.6.0"
+VERSION = "8.6.1"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -2021,7 +2021,11 @@ def titles_agree(a, b):
     if not na or not nb:
         return True
     import difflib
-    return na in nb or nb in na or difflib.SequenceMatcher(None, na, nb).ratio() >= 0.8
+    short, long_ = sorted((na, nb), key=len)
+    # one title inside the other counts only when it is most of it: "Gamera" is not "Gamera vs. Barugon"
+    if short in long_ and (len(short) >= 0.6 * len(long_) or len(short.split()) >= 3):
+        return True
+    return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.8
 
 
 def titles_same(a, b):
