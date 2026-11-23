@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.5.21"
+VERSION = "8.5.22"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -1970,7 +1970,8 @@ def title_from_name(name):
             rest = rest[1:-1].strip(" .-_")
         else:
             break
-    return rest if re.search(r"[A-Za-z]{2}", rest or "") else None
+    # a real title has two letters, together ("Pilot") or as initials ("P.E.", "U.F.O.")
+    return rest if re.search(r"[A-Za-z]{2}|\b[A-Za-z]\.[A-Za-z]\b", rest or "") else None
 
 
 def norm_title(t):
