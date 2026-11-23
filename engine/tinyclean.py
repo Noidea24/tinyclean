@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.6.1"
+VERSION = "8.6.2"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -3328,6 +3328,8 @@ def main():
     slot_text = {}                    # slot -> latest progress text
     prompting = threading.Event()
     multi = jobs > 1
+    mem_retry = []                    # files stopped for low memory next to other files: retried alone
+    alone = {"on": False}             # True while those retries run (one at a time)
 
     def progress_record():
         """The run's progress as one line of JSON, for the mediatool agent."""
@@ -3492,8 +3494,11 @@ def main():
                 out_path.unlink(missing_ok=True)
                 return out
             if rc == LOW_MEMORY:
-                notes.append(f"{err[-1]}; this file needs more memory than the container has, "
-                             f"convert it on a worker with more RAM")
+                if multi and not alone["on"]:
+                    notes.append("retry alone")
+                else:
+                    notes.append(f"{err[-1]}; this file needs more memory than the container has, "
+                                 f"convert it on a worker with more RAM")
                 out_path.unlink(missing_ok=True)
                 break
             if rc != 0:
@@ -3548,6 +3553,16 @@ def main():
                 how = (f"{change:.0f}% smaller" if change >= 0.5 else
                        f"{-change:.0f}% bigger" if change <= -0.5 else "same size, remuxed")
                 say(f"  [done] {human(size)} -> {human(new_size)} ({how}), saved as Clean/{final_path.name}")
+            elif notes and notes[-1] == "retry alone":
+                # Stopped for memory while other files were converting: try it again on its own at the
+                # end of the run, instead of failing it.
+                mem_retry.append((n, path, size))
+                say("  [later] memory ran low with other files converting; it gets another try on its "
+                    "own at the end of this run\n")
+                if created_clean and not any(v.get("status") == "done" for k, v in state.items()
+                                             if Path(k).parent == path.parent):
+                    remove_empty_clean(clean)
+                return out
             else:
                 result = "failed"
                 counts["failed"] += 1
@@ -3648,6 +3663,23 @@ def main():
     for t in threads:
         while t.is_alive():
             t.join(timeout=1)
+    if mem_retry and not STOP.now and not stop_flag.exists():
+        emit([f"\nTrying {len(mem_retry)} file(s) again on their own (memory ran low with others running):"])
+        alone["on"] = True
+        for n, path, size in mem_retry:
+            if STOP.now or stop_flag.exists():
+                break
+            slot = free_slots.get()
+            with lock:
+                inflight[slot] = (path, size)
+            if multi:
+                emit([f"[{n}/{len(files)}] started again, on its own: {path.name}  ({human(size)})"])
+                t = threading.Thread(target=worker, args=(n, path, size, slot), daemon=True)
+                t.start()
+                while t.is_alive():
+                    t.join(timeout=1)
+            else:
+                worker(n, path, size, slot)
     finished_all.set()
     if args.progress_lines:
         print(PROGRESS_PREFIX + json.dumps(progress_record()), flush=True)

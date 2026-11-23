@@ -170,3 +170,42 @@ def test_shows_are_listed_and_their_profiles_saved(tc, tmp_path, home):
     assert [s["profile"] for s in again] == ["animated", None]
     bad = run_cli("--set-profiles", json.dumps({"x": "cartoon"}), home=home, check=False)
     assert bad.returncode != 0
+
+
+def test_a_file_stopped_for_memory_next_to_others_is_retried_alone(tc, tmp_path, home, monkeypatch, capsys):
+    lib = tmp_path / "Movies"
+    for name in ("Film A (2001)", "Film B (2002)"):
+        make_video(lib / name / f"{name}.mkv", seconds=4)
+    real = tc.run_ffmpeg
+    stopped = set()
+
+    def first_try_runs_out_of_memory(cmd, total, label, progress, src_fps=None):
+        src = cmd[cmd.index("-i") + 1]
+        if src not in stopped:                      # each file's first try: memory runs low
+            stopped.add(src)
+            return tc.LOW_MEMORY, ["stopped: memory ran low (100 MB free, floor 256 MB)"]
+        return real(cmd, total, label, progress, src_fps)
+
+    monkeypatch.setattr(tc, "run_ffmpeg", first_try_runs_out_of_memory)
+    monkeypatch.setenv("HOME", str(home))
+    args = [a if a != "1" else "2" for a in CONVERT]          # --jobs 2
+    monkeypatch.setattr("sys.argv", ["tinyclean", str(lib), *args])
+    tc.main()
+    out = capsys.readouterr().out
+    assert out.count("[later] memory ran low") == 2, out
+    assert "Trying 2 file(s) again on their own" in out
+    assert "Converted 2, failed/skipped 0." in out
+    for name in ("Film A (2001)", "Film B (2002)"):
+        assert (lib / name / "Clean" / f"{name}-noidea.mkv").is_file()
+    assert [r["result"] for r in ledger_rows(home)] == ["done", "done"]
+
+
+def test_with_one_job_a_memory_stop_fails_the_file(tc, tmp_path, home, monkeypatch, capsys):
+    lib = tmp_path / "Movies"
+    make_video(lib / "Film A (2001)" / "Film A (2001).mkv", seconds=4)
+    monkeypatch.setattr(tc, "run_ffmpeg", lambda *a, **k: (tc.LOW_MEMORY, ["stopped: memory ran low (1 MB free)"]))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("sys.argv", ["tinyclean", str(lib), *CONVERT])
+    tc.main()
+    out = capsys.readouterr().out
+    assert "needs more memory than the container has" in out and "[later]" not in out
