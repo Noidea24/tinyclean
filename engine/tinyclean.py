@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.6.4"
+VERSION = "8.6.5"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -799,6 +799,7 @@ def verify(cfg, plan, out_path, sample_len=None):
 
 
 ALREADY_DONE = []
+FAILED_BEFORE = []                    # files skipped because they failed before (and --retry-failed is off)
 
 
 def has_clean_copy(p):
@@ -810,6 +811,8 @@ def has_clean_copy(p):
 
 
 def find_files(roots, cfg, state, include_done=False):
+    ALREADY_DONE.clear()
+    FAILED_BEFORE.clear()
     skip_dir = re.compile(r"^[._@#]")
     min_age = time.time() - cfg["min_age_minutes"] * 60
     items = []
@@ -839,8 +842,10 @@ def find_files(roots, cfg, state, include_done=False):
             if st.st_mtime > min_age:
                 continue
             prev = state.get(str(p))
-            if prev and prev.get("mtime") == int(st.st_mtime) and prev.get("status") != "fine" \
+            # "done" with no Clean copy any more (it was deleted) means: convert it again
+            if prev and prev.get("mtime") == int(st.st_mtime) and prev.get("status") not in ("fine", "done") \
                     and not cfg["retry_failed"]:
+                FAILED_BEFORE.append(p)
                 continue
             items.append((p, st.st_size))
     items.sort(key=lambda x: x[1], reverse=True)
@@ -3249,6 +3254,11 @@ def main():
     total_bytes = sum(s for _, s in files)
     if ALREADY_DONE:
         print(f"{len(ALREADY_DONE)} file(s) already have a Clean copy and are skipped.")
+    if FAILED_BEFORE:
+        print(f"{len(FAILED_BEFORE)} file(s) failed in an earlier run and are skipped "
+              f"(tick 'Retry files that failed before' to try them again):")
+        for p in FAILED_BEFORE[:20]:
+            print(f"  {p}")
     print(f"{len(files)} file(s) to look at, {human(total_bytes)} in total.\n")
 
     profiles_file = state_dir / "profiles.json"

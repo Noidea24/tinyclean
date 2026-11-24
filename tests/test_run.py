@@ -1,3 +1,4 @@
+import os
 import time
 """tinyclean run as a command on a small library, the way the workers run it."""
 import csv
@@ -229,3 +230,26 @@ def test_progress_lines_never_run_into_other_output(tc, tmp_path, home, monkeypa
     lines = capsys.readouterr().out.splitlines()
     assert any(l.startswith("@progress ") for l in lines)
     assert not [l for l in lines if "@progress" in l and not l.startswith("@progress ")]
+
+
+def test_a_deleted_clean_copy_is_made_again(tc, movies, home):
+    """You delete a bad Clean copy and run Convert on the file again: it is converted again,
+    not skipped because the state still says done."""
+    run_cli(movies, *CONVERT, home=home)
+    clean = next(movies.rglob("Clean/*-noidea.mkv"))
+    clean.unlink()
+    out = run_cli(movies, *CONVERT, home=home).stdout
+    assert "0 file(s) to look at" not in out, out
+    assert clean.is_file()
+
+
+def test_files_that_failed_before_are_named_when_skipped(tc, tmp_path, home):
+    lib = tmp_path / "Movies"
+    bad = lib / "Broken (2001)" / "Broken (2001).mp4"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(b"not a video" * 1000)
+    old = time.time() - 3600
+    os.utime(bad, (old, old))
+    run_cli(lib, *CONVERT, home=home)
+    out = run_cli(lib, *CONVERT, home=home).stdout
+    assert "failed in an earlier run and are skipped" in out and "Broken (2001).mp4" in out, out

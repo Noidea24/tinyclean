@@ -172,13 +172,25 @@ function folderPicker(getAgent, opts = {}) {
     for (const el of list.children) el.classList.toggle("sel", el.dataset.path === path);
     if (opts.onchange) opts.onchange(path, label);
   }
-  async function open(path) {
+  async function open(path, fallback) {
     const agent = getAgent();
     if (!agent) { list.replaceChildren(h("div", { class: "pick muted", text: "No worker is online." })); return; }
     list.replaceChildren(h("div", { class: "pick muted", text: "Loading..." }));
     let data;
     try { data = await agentApi(agent, "browse" + (path ? "?path=" + encodeURIComponent(path) : "")); }
-    catch (e) { list.replaceChildren(h("div", { class: "pick error", text: e.message })); return; }
+    catch (e) {
+      // A remembered path can be a file (you picked one last time) or gone (renamed, deleted): show its
+      // folder instead, or the libraries, rather than getting stuck on the error.
+      if (path && !fallback) {
+        const parent = path.replace(/\/[^/]+\/?$/, "");
+        await open(parent && parent !== path ? parent : null, true);
+        if (e.message === "not a folder" && opts.files) pick(path);
+        return;
+      }
+      if (path) { await open(null, true); return; }
+      list.replaceChildren(h("div", { class: "pick error", text: e.message }));
+      return;
+    }
     crumbs.replaceChildren();
     if (data.path) {
       crumbs.append(h("a", { text: "Libraries", onclick: () => open(null) }));
