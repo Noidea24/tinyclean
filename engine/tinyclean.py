@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.6.2"
+VERSION = "8.6.3"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -3355,7 +3355,11 @@ def main():
         while not finished_all.is_set():
             time.sleep(2 if args.progress_lines else 1)
             if args.progress_lines:
-                print(PROGRESS_PREFIX + json.dumps(progress_record()), flush=True)
+                # One write for the whole line: print() writes the text and the newline separately, and
+                # another thread's line could land between them (a file's header ran into a progress line).
+                with lock:
+                    sys.stdout.write(PROGRESS_PREFIX + json.dumps(progress_record()) + "\n")
+                    sys.stdout.flush()
                 continue
             if not tty or prompting.is_set():
                 continue
@@ -3379,7 +3383,8 @@ def main():
             if multi and tty:
                 cols = shutil.get_terminal_size((120, 20)).columns
                 print("\r" + " " * (cols - 1) + "\r", end="")
-            print("\n".join(lines), flush=True)
+            sys.stdout.write("\n".join(lines) + "\n")
+            sys.stdout.flush()
 
     def process(n, path, size, slot):
         out = []
@@ -3388,7 +3393,9 @@ def main():
             if multi:
                 out.append(line)
             else:
-                print(line, flush=True)
+                with lock:
+                    sys.stdout.write(line + "\n")
+                    sys.stdout.flush()
 
         def prog(text):
             slot_text[slot] = text

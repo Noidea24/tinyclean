@@ -1,3 +1,4 @@
+import time
 """tinyclean run as a command on a small library, the way the workers run it."""
 import csv
 import subprocess
@@ -209,3 +210,22 @@ def test_with_one_job_a_memory_stop_fails_the_file(tc, tmp_path, home, monkeypat
     tc.main()
     out = capsys.readouterr().out
     assert "needs more memory than the container has" in out and "[later]" not in out
+
+
+def test_progress_lines_never_run_into_other_output(tc, tmp_path, home, monkeypatch, capsys):
+    lib = tmp_path / "Movies"
+    for name in ("Film A (2001)", "Film B (2002)"):
+        make_video(lib / name / f"{name}.mkv", seconds=4)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("sys.argv", ["tinyclean", str(lib), *CONVERT, "--progress-lines"])
+    real = tc.run_ffmpeg
+
+    def slow(*a, **k):                         # give the progress ticker time to write while files run
+        time.sleep(2.5)
+        return real(*a, **k)
+
+    monkeypatch.setattr(tc, "run_ffmpeg", slow)
+    tc.main()
+    lines = capsys.readouterr().out.splitlines()
+    assert any(l.startswith("@progress ") for l in lines)
+    assert not [l for l in lines if "@progress" in l and not l.startswith("@progress ")]
