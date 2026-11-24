@@ -85,3 +85,18 @@ def test_high_quality_makes_an_8_bit_source_10_bit(tc, cfg, tmp_path):
     std = {**tc.profile_cfg(cfg, "live"), "encoder": "qsv", "device": "/dev/dri/renderD128"}
     cmd = " ".join(tc.build_cmd(p, std, tmp_path / "out.mkv", "encode", decode="gpu"))
     assert "-profile:v main " in cmd and "-hwaccel qsv" in cmd
+
+
+def test_a_dub_flagged_default_does_not_beat_english(tc, cfg, tmp_path):
+    """Adventure Time: Russian voice-over flagged default, English also there: English plays by default."""
+    import subprocess
+    src = tmp_path / "at.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=3",
+                    "-f", "lavfi", "-i", "sine=duration=3", "-f", "lavfi", "-i", "sine=frequency=600:duration=3",
+                    "-map", "0", "-map", "1", "-map", "2", "-c:v", "libx264", "-c:a", "aac",
+                    "-metadata:s:a:0", "language=rus", "-metadata:s:a:1", "language=eng",
+                    "-disposition:a:0", "default", "-disposition:a:1", "0", str(src)], check=True)
+    p = plan(tc, cfg, src)
+    defaults = [tc.lang_of(a["stream"]) for a in p["audio"] if a["default"]]
+    assert defaults == ["eng"], [(tc.lang_of(a["stream"]), a["default"]) for a in p["audio"]]
+    assert {tc.lang_of(a["stream"]) for a in p["audio"]} == {"eng", "rus"}

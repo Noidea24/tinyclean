@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.6.5"
+VERSION = "8.6.6"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -88,6 +88,11 @@ STEREO_COPY_CODECS = {"aac", "ac3", "eac3", "mp3"}
 ENGLISH = {"eng", "en", "english"}
 JAPANESE = {"jpn", "ja", "japanese"}
 KEEP_AUDIO = [("English", ENGLISH), ("Japanese", JAPANESE)]   # kept in this order
+# Languages that, on a release that also has English, are almost always a dub (a Russian or Polish voice-over
+# on a US cartoon), not the original: such a track is kept, but English stays the default.
+DUB_LANGS = {"rus", "ru", "ukr", "uk", "pol", "pl", "ger", "deu", "de", "fre", "fra", "fr", "ita", "it", "spa", "es",
+             "por", "pt", "cze", "ces", "hun", "tur", "dut", "nld", "swe", "nor", "dan", "fin", "gre", "ell", "rum",
+             "ron", "bul", "hrv", "srp", "slv", "slk", "heb", "ara", "hin", "tha", "vie", "ind", "lit", "lav", "est"}
 CLEAN_DIR = "Clean"
 UNTAGGED = {"", "und", "unk", "unknown", "none", "zxx"}
 TEXT_SUB_CONVERT = {"mov_text": "srt"}          # codec -> target for MKV
@@ -512,8 +517,13 @@ def plan_file(path, info, cfg):
             # More than one flagged default: prefer English, then the first.
             eng = [i for i in defaults if lang_of(audio[i]["stream"]) in ENGLISH]
             defaults = eng or defaults
+        chosen = defaults[0] if defaults else 0
+        eng = [i for i, a in enumerate(audio) if lang_of(a["stream"]) in ENGLISH]
+        if eng and lang_of(audio[chosen]["stream"]) in DUB_LANGS:
+            # Adventure Time: a Russian voice-over flagged default next to the English track
+            chosen = eng[0]
         for i, a in enumerate(audio):
-            a["default"] = i == (defaults[0] if defaults else 0)
+            a["default"] = i == chosen
 
     # ---- subtitles
     subs, s_why = pick_subs(streams)
