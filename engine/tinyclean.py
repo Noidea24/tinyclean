@@ -62,7 +62,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- defaults --
 
-VERSION = "8.6.3"
+VERSION = "8.6.4"
 SUFFIX = "-noidea"                  # added to every finished file's name
 OLD_SUFFIXES = ("-Clean",)          # names used by earlier versions; still count as done
 ALL_SUFFIXES = (SUFFIX,) + OLD_SUFFIXES
@@ -2184,7 +2184,10 @@ def make_plan(entries, skipped, mode, templates, scope, folders=0, new_root_suff
                 code = f"S{int(v.get('season') or 0):02d}E{int(v.get('episode') or 0):02d}"
                 pair = two_part_hit(index, e, mine) if mine else None
                 if (mine and not pair and two_titles(mine) and titles_agree(mine, plex_title)
-                        and norm_title(mine) != norm_title(plex_title)):
+                        and norm_title(mine) != norm_title(plex_title)
+                        and not re.search(r"\s(?:-|&|/)\s|:\s", plex_title or "")):
+                    # (skipped when Plex's own title has the '&', '-' or ':' too, like 'Fry & the Slurm
+                    # Factory' or 'Piss & S**t': then it is one title, not two segments)
                     # 'A - B' where Plex has only A here: naming it A would hide B
                     skips.append((str(f), f"the file name holds two titles (\u201c{mine}\u201d) but Plex has only one "
                                           f"of them at {code} (\u201c{plex_title}\u201d), and naming it after one "

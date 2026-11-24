@@ -988,3 +988,17 @@ def test_files_a_run_could_not_open_show_in_needs_you(tc, lib, tmp_path, monkeyp
     assert [r["file"] for r in rows] == [str(bad)] and rows[0]["redownload"] and "moov atom" in rows[0]["notes"]
     os.utime(bad, (1, 1))                       # replaced since: no longer listed
     assert tc.unreadable_files(state) == []
+
+
+def test_a_title_with_an_ampersand_in_plex_is_one_title(tc, lib):
+    """Futurama 'Fry & the Slurm Factory' and Workaholics 'Piss & S**t' are one episode each."""
+    d = lib["shows"] / "breaking bad" / "S2"
+    f = touch(d / "Show.S02E04.Fry.&.the.Slurm.Factory.AAC2.0.1080p-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 2, 4, "Fry & the Slurm Factory", str(f)))
+    g = touch(d / "s02e05 - Piss & Shit-noidea.mkv")
+    lib["plex"].episodes.append(episode("10", 2, 5, "Piss & S**t", str(g)))
+    p = plan(tc, lib, "rename")
+    skipped = dict(p["skipped"])
+    assert str(f) not in skipped and str(g) not in skipped, skipped
+    new = {it["old"]: it["new"] for it in p["items"]}
+    assert "S02E04 - Fry & the Slurm Factory" in new[str(f)]
